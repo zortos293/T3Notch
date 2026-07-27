@@ -219,8 +219,11 @@ relative to the worktree.
 
 ### Finished agents
 
+![A finished agent, pinned until it is reviewed](docs/done.png)
+
 A finished agent stays pinned as a Done card until it is reviewed, rather than
-flashing past. Two things clear it: pressing **Open in T3 Code** in the notch, or
+flashing past. Its review bar sits at the foot of the panel, under what the agent
+actually did. Two things clear it: pressing **Open in T3 Code** in the notch, or
 settling the thread in T3 Code (`settledAt`). T3 Code's own read state lives in
 renderer `localStorage` (`threadLastVisitedAtById`) and is not exposed over HTTP,
 so simply opening the thread in the T3 Code window cannot clear the notch. Threads
