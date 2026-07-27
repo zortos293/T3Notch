@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
+import T3NotchCore
 
 /// The control panel. Styled like the notch it configures rather than like a
 /// stock macOS settings window: dark, rounded cards, the brand blue for controls.
 struct SettingsView: View {
     let store: AgentStore
     @Bindable var settings: SettingsStore
+    let updater: Updater
     /// Reopens the first-launch quick start.
     var onShowQuickStart: () -> Void = {}
 
@@ -149,6 +151,41 @@ struct SettingsView: View {
                     )
                 }
 
+                SettingsCard("Updates") {
+                    SettingsRow(
+                        "T3Notch \(updater.versionLabel)",
+                        detail: updater.status.summary,
+                        detailIsProblem: updater.status.isProblem
+                    ) {
+                        UpdateControls(updater: updater)
+                    }
+                    if updater.canUpdate {
+                        SettingsDivider()
+                        SettingsToggle(
+                            "Check automatically",
+                            detail: "Shortly after launch, then every six hours.",
+                            isOn: settings.binding(\.automaticUpdates)
+                        )
+                        SettingsDivider()
+                        SettingsToggle(
+                            "Download in the background",
+                            detail:
+                                "Fetch the new build as soon as it appears. Installing still waits "
+                                + "for you, since it restarts the app.",
+                            isOn: settings.binding(\.automaticDownload)
+                        )
+                        .disabled(!settings.values.automaticUpdates)
+                        SettingsDivider()
+                        SettingsToggle(
+                            "Include pre-releases",
+                            detail:
+                                "Also take releases marked pre-release, the way T3 Code's nightly "
+                                + "channel does.",
+                            isOn: prereleaseChannel
+                        )
+                    }
+                }
+
                 SettingsCard("Connection") {
                     SettingsRow(
                         connectionTitle,
@@ -195,6 +232,13 @@ struct SettingsView: View {
         .onAppear {
             loginItemEnabled = LoginItem.isEnabled
         }
+    }
+
+    private var prereleaseChannel: Binding<Bool> {
+        Binding(
+            get: { settings.values.updateChannel == .prerelease },
+            set: { settings.set(\.updateChannel, to: $0 ? .prerelease : .stable) }
+        )
     }
 
     private var forgeDetail: String {
@@ -260,6 +304,46 @@ struct SettingsView: View {
             )
         }
         .ignoresSafeArea()
+    }
+}
+
+/// Whatever the update state calls for: a check, a download, or a restart.
+private struct UpdateControls: View {
+    let updater: Updater
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch updater.status {
+            case .unsupported:
+                PillButton("Releases") {
+                    NSWorkspace.shared.open(updater.releasesPageURL)
+                }
+            case let .available(release):
+                notesButton(release)
+                PillButton("Download") { updater.download(release) }
+            case let .downloading(_, fraction):
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .frame(width: 78)
+                PillButton("Cancel") { updater.cancel() }
+            case let .readyToInstall(release, _):
+                notesButton(release)
+                PillButton("Install and relaunch") { updater.install() }
+            case .installing:
+                ProgressView().controlSize(.small)
+            default:
+                PillButton(updater.status == .checking ? "Checking…" : "Check now") {
+                    Task { await updater.check() }
+                }
+                .disabled(updater.isBusy)
+            }
+        }
+    }
+
+    private func notesButton(_ release: UpdateRelease) -> some View {
+        PillButton("What's new") {
+            NSWorkspace.shared.open(release.pageURL)
+        }
     }
 }
 

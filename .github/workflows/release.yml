@@ -1,0 +1,132 @@
+name: Release
+
+# Started by hand from the Actions tab: give it a version, it builds the app on a
+# real macOS 26 runner and publishes the release the in-app updater reads.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the v (1.1.0, or 1.1.0-beta.1)"
+        required: true
+        type: string
+      channel:
+        description: "stable, or prerelease for builds the nightly channel picks up"
+        default: stable
+        type: choice
+        options:
+          - stable
+          - prerelease
+      publish:
+        description: "Publish a GitHub release. Off builds and uploads an artifact only."
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      VERSION: ${{ inputs.version }}
+      # Monotonic across runs, which is all CFBundleVersion has to be.
+      BUILD_NUMBER: ${{ github.run_number }}
+      TAG: v${{ inputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the version and the tag
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 1.1.0 or 1.1.0-beta.1"
+            exit 1
+          fi
+          if [[ "${{ inputs.channel }}" == "stable" && "$VERSION" == *-* ]]; then
+            echo "::error::$VERSION is a pre-release version; pick the prerelease channel"
+            exit 1
+          fi
+          if [[ "${{ inputs.publish }}" == "true" ]] && git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG already exists"
+            exit 1
+          fi
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app bundle
+        run: Scripts/bundle.sh release
+
+      - name: Check the bundle carries the version it was asked for
+        run: |
+          # The updater refuses a download whose Info.plist disagrees with the
+          # release tag, so a mismatch here would ship an update nobody can install.
+          plist="dist/T3Notch.app/Contents/Info.plist"
+          built=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist")
+          [[ "$built" == "$VERSION" ]] || { echo "::error::bundle says $built"; exit 1; }
+          codesign --verify --deep --strict dist/T3Notch.app
+          echo "$built ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist"))"
+
+      - name: Package
+        id: package
+        run: |
+          # ditto, so the ad-hoc signature and the bundle's symlinks survive the zip.
+          zip="dist/T3Notch-${VERSION}-arm64.zip"
+          ditto -c -k --keepParent dist/T3Notch.app "$zip"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: T3Notch-${{ inputs.version }}-arm64
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA256: ${{ steps.package.outputs.sha }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          cat > notes.md <<EOF
+          ## Install
+
+          Download \`$(basename "$ZIP")\`, unzip it, and drag **T3Notch.app** to \`/Applications\`.
+          The build is ad-hoc signed rather than notarized, so the first launch needs
+          right-click → **Open** → **Open**, or:
+
+          \`\`\`bash
+          xattr -d com.apple.quarantine /Applications/T3Notch.app
+          \`\`\`
+
+          Already running T3Notch 1.1.0 or later? It will offer this update by itself,
+          or you can ask now from the menu bar icon → **Check for Updates…**.
+
+          Needs macOS 26 or later on Apple silicon, with T3 Code running.
+
+          \`sha256\`: \`${SHA256}\`
+          EOF
+
+          flags=(--title "T3Notch ${VERSION}" --notes-file notes.md --generate-notes
+                 --target "${GITHUB_SHA}")
+          if [[ "${{ inputs.channel }}" == "prerelease" ]]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "$TAG" "$ZIP" "${flags[@]}"
+          echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
+          gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"

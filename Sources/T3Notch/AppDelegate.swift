@@ -5,23 +5,33 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var store: AgentStore!
     private var settings: SettingsStore!
+    private var updater: Updater!
     private var panelController: NotchPanelController?
     private var settingsWindow: SettingsWindowController?
     private var statusItem: NSStatusItem?
+    /// Hidden until an update is worth mentioning.
+    private var updateItem: NSMenuItem?
+    private var statusItemBadged = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
         settings = SettingsStore()
         store = AgentStore(settings: settings)
+        updater = Updater(settings: settings)
         let controller = NotchPanelController(store: store)
         panelController = controller
-        settingsWindow = SettingsWindowController(store: store, settings: settings)
+        settingsWindow = SettingsWindowController(
+            store: store,
+            settings: settings,
+            updater: updater
+        )
 
         // Applied immediately rather than on the next poll, so a flipped switch
         // feels like it did something.
         settings.onChange = { [weak self] in
             self?.store.applySettings()
+            self?.updater.applySettings()
             self?.panelController?.refresh()
         }
 
@@ -29,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         installMainMenu()
         store.bootstrap()
+        if settings.values.automaticUpdates {
+            updater.start()
+        }
 
         if settings.values.needsQuickStart {
             // After bootstrap, so the connection test has a chance to pass on a
@@ -44,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.panelController?.refresh()
+                self?.syncStatusItemBadge()
             }
         }
     }
@@ -54,12 +68,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.image = Self.statusItemImage()
         }
         let menu = NSMenu()
+        menu.delegate = self
+        updateItem = NSMenuItem(
+            title: "Install Update",
+            action: #selector(installUpdate),
+            keyEquivalent: ""
+        )
+        updateItem?.isHidden = true
+        menu.addItem(updateItem!)
         menu.addItem(NSMenuItem(title: "Expand Notch", action: #selector(expand), keyEquivalent: "e"))
         menu.addItem(
             NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         )
         menu.addItem(
             NSMenuItem(title: "Quick Start…", action: #selector(openQuickStart), keyEquivalent: "")
+        )
+        menu.addItem(
+            NSMenuItem(
+                title: "Check for Updates…",
+                action: #selector(checkForUpdates),
+                keyEquivalent: ""
+            )
         )
         menu.addItem(NSMenuItem(title: "Reconnect", action: #selector(reconnect), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
@@ -145,20 +174,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Menu bar glyph: the panel's own silhouette, drawn as a template image so
     /// it tints itself for light, dark, and highlighted menu bars.
-    private static func statusItemImage() -> NSImage {
-        let size = NSSize(width: 20, height: 11)
+    ///
+    /// A waiting update adds a dot beside it. The image is a template, so the dot
+    /// cannot be blue — being detached from the silhouette is what makes it read
+    /// as a badge rather than part of the shape.
+    private static func statusItemImage(badged: Bool = false) -> NSImage {
+        let notch = NSSize(width: 20, height: 11)
+        let dot: CGFloat = 4
+        let gap: CGFloat = 3
+        let size = NSSize(
+            width: badged ? notch.width + gap + dot : notch.width,
+            height: notch.height
+        )
         // `flipped: true` keeps NotchShape's top-down geometry pointing down.
-        let image = NSImage(size: size, flipped: true) { rect in
+        let image = NSImage(size: size, flipped: true) { _ in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            let path = NotchShape(topRadius: 3, bottomRadius: 4.5).path(in: rect)
-            context.addPath(path.cgPath)
             context.setFillColor(NSColor.black.cgColor)
+            let path = NotchShape(topRadius: 3, bottomRadius: 4.5)
+                .path(in: CGRect(origin: .zero, size: notch))
+            context.addPath(path.cgPath)
             context.fillPath()
+            if badged {
+                context.fillEllipse(
+                    in: CGRect(
+                        x: notch.width + gap,
+                        y: (notch.height - dot) / 2,
+                        width: dot,
+                        height: dot
+                    )
+                )
+            }
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "T3Notch"
+        image.accessibilityDescription = badged ? "T3Notch, update available" : "T3Notch"
         return image
+    }
+
+    /// Cheap enough to run on the panel's own tick, and only redraws on a change.
+    private func syncStatusItemBadge() {
+        guard updater.hasOffer != statusItemBadged else { return }
+        statusItemBadged = updater.hasOffer
+        statusItem?.button?.image = Self.statusItemImage(badged: statusItemBadged)
     }
 
     @objc private func expand() {
@@ -174,11 +231,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.show(quickStart: true)
     }
 
+    /// Opens the panel where the result will show up, then asks GitHub.
+    @objc private func checkForUpdates() {
+        settingsWindow?.show()
+        Task { await updater.check() }
+    }
+
+    @objc private func installUpdate() {
+        switch updater.status {
+        case .readyToInstall:
+            updater.install()
+        case let .available(release):
+            settingsWindow?.show()
+            updater.download(release)
+        default:
+            checkForUpdates()
+        }
+    }
+
     @objc private func reconnect() {
         store.bootstrap()
     }
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+}
+
+extension AppDelegate: NSMenuDelegate {
+    /// The update entry is written the moment the menu opens, so it never shows a
+    /// version that has since been installed or withdrawn.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let updateItem else { return }
+        switch updater.status {
+        case let .readyToInstall(release, _):
+            updateItem.title = "Install \(release.version) and Relaunch"
+            updateItem.isHidden = false
+        case let .available(release):
+            updateItem.title = "Download \(release.version)"
+            updateItem.isHidden = false
+        default:
+            updateItem.isHidden = true
+        }
     }
 }

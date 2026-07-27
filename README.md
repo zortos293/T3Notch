@@ -38,6 +38,8 @@ needs an answer.
   branch lands.
 - **A control panel** for attention, animations, row counts and which display it
   lives on.
+- **It updates itself** from GitHub releases, with a pre-release channel for
+  builds that are not ready for everyone.
 
 ## A look around
 
@@ -120,6 +122,9 @@ there are no decorative preferences.
 | Display | `NotchGeometry.preferredScreen(named:)` |
 | Launch at login | `SMAppService.mainApp` |
 | Open in the T3 Code app | `openInT3Code`, before its browser fallback |
+| Check automatically | the `Updater` poller |
+| Download in the background | whether a found release is fetched without asking |
+| Include pre-releases | `UpdateChannel`, which releases the feed will offer |
 
 Values live in one struct persisted to `UserDefaults`, and writes go through a
 single setter that saves and then calls `AgentStore.applySettings()`, so a flipped
@@ -135,6 +140,29 @@ built-in notched screen whenever the chosen display is unplugged.
 
 The Milestones section has **Preview** buttons for both animations, which is the
 only way to see them without finishing a plan or merging a branch.
+
+## Updating
+
+T3Notch keeps itself current the way T3 Code does — a check shortly after launch,
+then one on a timer — and reports the same states along the way: checking, up to
+date, available, downloading, ready to install. The **Updates** card in the control
+panel is where all of it surfaces, and the menu bar item grows an **Install … and
+Relaunch** entry once a build is waiting.
+
+Nothing restarts the app behind your back. A new build downloads on its own if you
+leave that on, but installing it always waits for a click.
+
+```
+Updates
+  T3Notch 1.0.0 (1)          [ What's new ]  [ Install and relaunch ]
+  Version 1.1.0 is ready to install.
+```
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Check automatically | on | 15s after launch, then every 6 hours |
+| Download in the background | on | fetch as soon as a release appears |
+| Include pre-releases | off | also take releases marked pre-release |
 
 ## How it works
 
@@ -215,6 +243,28 @@ notch. A pull request is usually merged well after the agent stopped, and T3 Cod
 auto-settles the thread as soon as it sees the merge — so a watcher that only looked
 at currently listed threads would go blind exactly when the merge landed.
 
+### Self-update
+
+electron-updater, which T3 Code hands its builds to Squirrel through, publishes a
+`latest-mac.yml` manifest beside each build. A single-asset app needs no manifest:
+the releases endpoint already carries the version, the notes and the download URL,
+and it is the same list a person would read. Tags are compared as semver rather than
+as strings, so `1.10.0` beats `1.9.0` and `1.1.0-beta.1` stays behind `1.1.0`; an
+asset naming another architecture is not offered even when it is the only one there.
+
+Installing is a download, a `ditto -x` into a temporary directory *on the app's own
+volume*, and a single `replaceItemAt`. Same volume, because a swap across volumes is
+a copy and a copy can fail half-way; one atomic replace, because a failure then
+leaves the running app untouched rather than half-overwritten. The unpacked bundle
+has to identify itself as this app and carry exactly the version the release
+promised before any of that happens. A relaunch script waits for this process to
+exit before reopening, so it cannot race the swap or leave two copies running.
+
+`ditto` rather than any other unpacker: it is what wrote the zip, and it is the one
+that keeps the code signature intact across the round trip. Updates are only offered
+to a packaged app — a binary run straight from SwiftPM has no bundle to replace, and
+the card says so instead of failing later.
+
 ### Clocks
 
 Elapsed labels read an observable `clock` on the store that ticks once a second
@@ -256,3 +306,19 @@ same silhouette at 20×11 as a template image.
 ```bash
 ./Scripts/make-icon.sh   # rewrites Resources/AppIcon.icns
 ```
+
+### Cutting a release
+
+**Actions → Release → Run workflow**, on a macOS 26 runner with the same Xcode 26.6
+the app is built with locally. Give it a version (`1.1.0`, or `1.1.0-beta.1` on the
+prerelease channel) and it tests, builds, checks that the bundle really carries that
+version, packages with `ditto`, and publishes the tag with the zip and its checksum.
+
+Turn **publish** off for a dry run: the same build lands as a workflow artifact and
+no tag is created. The version and the tag are checked before anything is built, so
+a typo or an existing tag fails in seconds rather than after a full build.
+
+`CFBundleShortVersionString` must match the tag exactly — it is what the updater
+compares the downloaded bundle against, and a mismatch would ship an update that
+refuses to install. The workflow enforces it; `Scripts/bundle.sh` reads `VERSION` and
+`BUILD_NUMBER` from the environment for the same reason.

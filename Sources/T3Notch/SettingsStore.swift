@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import T3NotchCore
 
 /// User-adjustable behaviour, persisted in `UserDefaults`.
 ///
@@ -38,6 +39,14 @@ final class SettingsStore {
         /// Bring the T3 Code desktop app forward instead of opening the web UI,
         /// when it is running.
         var openInDesktopApp = true
+
+        /// Look for a newer release shortly after launch and every few hours.
+        var automaticUpdates = true
+        /// Fetch the zip as soon as one is found. Installing still waits for a
+        /// click, since it restarts the app.
+        var automaticDownload = true
+        /// `.prerelease` also takes GitHub pre-releases, like T3 Code's nightly.
+        var updateChannel = UpdateChannel.stable
         /// Cleared once the quick start has been dismissed.
         var needsQuickStart = true
     }
@@ -111,6 +120,11 @@ final class SettingsStore {
         values.displayName = defaults.string(forKey: prefix + "displayName")?.nilIfBlank
         values.openInDesktopApp = bool("openInDesktopApp", values.openInDesktopApp)
         values.needsQuickStart = bool("needsQuickStart", values.needsQuickStart)
+        values.automaticUpdates = bool("automaticUpdates", values.automaticUpdates)
+        values.automaticDownload = bool("automaticDownload", values.automaticDownload)
+        values.updateChannel =
+            defaults.string(forKey: prefix + "updateChannel")
+            .flatMap(UpdateChannel.init(rawValue:)) ?? values.updateChannel
 
         return values
     }
@@ -130,6 +144,9 @@ final class SettingsStore {
         defaults.set(values.taskRows, forKey: Self.prefix + "taskRows")
         defaults.set(values.openInDesktopApp, forKey: Self.prefix + "openInDesktopApp")
         defaults.set(values.needsQuickStart, forKey: Self.prefix + "needsQuickStart")
+        defaults.set(values.automaticUpdates, forKey: Self.prefix + "automaticUpdates")
+        defaults.set(values.automaticDownload, forKey: Self.prefix + "automaticDownload")
+        defaults.set(values.updateChannel.rawValue, forKey: Self.prefix + "updateChannel")
         if let displayName = values.displayName {
             defaults.set(displayName, forKey: Self.prefix + "displayName")
         } else {

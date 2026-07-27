@@ -9,13 +9,15 @@ import SwiftUI
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let store: AgentStore
     private let settings: SettingsStore
+    private let updater: Updater
     private var window: NSWindow?
     /// Quick start replaces the settings list until it is dismissed.
     private var showingQuickStart = false
 
-    init(store: AgentStore, settings: SettingsStore) {
+    init(store: AgentStore, settings: SettingsStore, updater: Updater) {
         self.store = store
         self.settings = settings
+        self.updater = updater
         super.init()
     }
 
@@ -81,7 +83,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                 self?.finishQuickStart()
             }
         } else {
-            SettingsView(store: store, settings: settings) { [weak self] in
+            SettingsView(store: store, settings: settings, updater: updater) { [weak self] in
                 self?.show(quickStart: true)
             }
         }
