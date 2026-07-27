@@ -226,15 +226,6 @@ struct SettingsView: View {
         return T3CodeApp.isRunning ? base : base + " Not running right now, so the browser is used."
     }
 
-    private var connectionTitle: String {
-        switch store.connectionState {
-        case .connected: "Connected"
-        case .connecting: "Connecting…"
-        case .unauthorized: "Not authorised"
-        case .disconnected: "Disconnected"
-        }
-    }
-
     private var header: some View {
         HStack(spacing: 11) {
             NotchShape(topRadius: 5, bottomRadius: 9)

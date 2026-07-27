@@ -13,6 +13,16 @@ final class AgentStore {
         case attention
     }
 
+    private enum RemoteRestoreResult: Sendable {
+        case register(
+            EnvironmentProfile,
+            EnvironmentDescriptor,
+            ServerEndpoint,
+            DPoPHTTPAuthorizer
+        )
+        case placeholder(EnvironmentProfile, EnvironmentConnectionState)
+    }
+
     var connectionState: ConnectionState = .connecting
     var projects: [ProjectShell] = []
     var threads: [ThreadShell] = []
@@ -71,6 +81,9 @@ final class AgentStore {
     private var localEnvironmentID: EnvironmentID?
     private var dpopSigner: DPoPSigner?
     private var t3ConnectClient: T3ConnectClient?
+    private var t3ConnectConfiguration: T3ConnectConfiguration?
+    private var t3ConnectEnabledStates: [EnvironmentID: Bool] = [:]
+    private var remoteRestoreInFlight = false
     private var directFailureCounts: [EnvironmentID: Int] = [:]
     private var directProbeSuccesses: [EnvironmentID: Int] = [:]
     private var connectFallbacksInFlight: Set<EnvironmentID> = []
@@ -97,7 +110,7 @@ final class AgentStore {
         watcherUsesForge = usesForge
         mergeWatcher = MergeWatcher(forge: usesForge ? .gh : .disabled)
         observeCoordinator()
-        refreshT3ConnectDetection()
+        Task { await refreshT3ConnectDetectionNow() }
     }
 
     var focusedThread: ThreadShell? {
@@ -586,12 +599,21 @@ final class AgentStore {
             authorizer: BearerHTTPAuthorizer(token: token)
         )
         connectionState = .connecting
-        await restoreRemoteMachines()
         startMergeWatch()
+        await refreshT3ConnectDetectionNow()
+        await restoreRemoteMachines()
     }
 
     private func restoreRemoteMachines() async {
+        guard !remoteRestoreInFlight else { return }
+        remoteRestoreInFlight = true
+        defer { remoteRestoreInFlight = false }
+
         let profiles = profileStore.load()
+        t3ConnectEnabledStates = Dictionary(
+            profiles.map { ($0.environmentID, $0.enabled) },
+            uniquingKeysWith: { _, latest in latest }
+        )
         for profile in profiles where !profile.enabled {
             installPlaceholder(profile: profile, state: .offline("Disabled"))
         }
@@ -621,74 +643,95 @@ final class AgentStore {
             return
         }
         guard let signer = dpopSigner else { return }
-        for profile in profiles where profile.enabled {
-            if profile.source == .t3Connect {
-                let state: EnvironmentConnectionState
-                if T3ConnectConfiguration.load() == nil {
-                    state = .incompatible("T3 Connect is not configured in this build.")
-                } else if document.importedT3Connect == nil {
-                    state = .unauthorized
-                } else if let endpoint = profile.directEndpoint,
-                          let credential = document.connectEnvironmentCredentials[
+        let configurationAvailable = t3ConnectConfiguration != nil
+        let results = await withTaskGroup(
+            of: RemoteRestoreResult?.self,
+            returning: [RemoteRestoreResult].self
+        ) { group in
+            for profile in profiles where profile.enabled {
+                group.addTask {
+                    if profile.source == .t3Connect {
+                        guard configurationAvailable else {
+                            return .placeholder(
+                                profile,
+                                .incompatible("T3 Connect is not configured in this build.")
+                            )
+                        }
+                        guard document.importedT3Connect != nil else {
+                            return .placeholder(profile, .unauthorized)
+                        }
+                        guard let endpoint = profile.directEndpoint,
+                              let credential = document.connectEnvironmentCredentials[
+                                profile.environmentID.rawValue
+                              ],
+                              !credential.needsRefresh
+                        else {
+                            return .placeholder(profile, .connecting)
+                        }
+                        let authorizer = DPoPHTTPAuthorizer(
+                            accessToken: credential.accessToken,
+                            signer: signer
+                        )
+                        let client = T3HTTPClient(endpoint: endpoint, authorizer: authorizer)
+                        guard let descriptor = try? await client.fetchEnvironment(),
+                              descriptor.environmentId == profile.environmentID.rawValue,
+                              (try? await client.verifySession()) != nil
+                        else {
+                            return .placeholder(profile, .connecting)
+                        }
+                        return .register(profile, descriptor, endpoint, authorizer)
+                    }
+
+                    guard profile.source == .direct else { return nil }
+                    guard let endpoint = profile.directEndpoint,
+                          let credential = document.environmentCredentials[
                             profile.environmentID.rawValue
-                          ],
-                          !credential.needsRefresh
-                {
+                          ]
+                    else {
+                        return .placeholder(profile, .needsPairing)
+                    }
+                    guard !credential.needsRefresh else {
+                        return .placeholder(profile, .needsPairing)
+                    }
                     let authorizer = DPoPHTTPAuthorizer(
                         accessToken: credential.accessToken,
                         signer: signer
                     )
-                    let client = T3HTTPClient(endpoint: endpoint, authorizer: authorizer)
-                    if let descriptor = try? await client.fetchEnvironment(),
-                       descriptor.environmentId == profile.environmentID.rawValue,
-                       (try? await client.verifySession()) != nil
-                    {
-                        coordinator.register(
-                            profile: profile,
-                            descriptor: descriptor,
-                            endpoint: endpoint,
-                            authorizer: authorizer
+                    let descriptor = try? await T3HTTPClient(
+                        endpoint: endpoint,
+                        authorizer: authorizer
+                    ).fetchEnvironment()
+                    guard let descriptor,
+                          descriptor.environmentId == profile.environmentID.rawValue
+                    else {
+                        return .placeholder(
+                            profile,
+                            .incompatible("The endpoint reports a different environment.")
                         )
-                        continue
                     }
-                    state = .connecting
-                } else {
-                    state = .connecting
+                    return .register(profile, descriptor, endpoint, authorizer)
                 }
+            }
+
+            var resolved: [RemoteRestoreResult] = []
+            for await result in group {
+                if let result { resolved.append(result) }
+            }
+            return resolved
+        }
+
+        for result in results {
+            switch result {
+            case let .register(profile, descriptor, endpoint, authorizer):
+                coordinator.register(
+                    profile: profile,
+                    descriptor: descriptor,
+                    endpoint: endpoint,
+                    authorizer: authorizer
+                )
+            case let .placeholder(profile, state):
                 installPlaceholder(profile: profile, state: state)
-                continue
             }
-            guard profile.source == .direct else { continue }
-            guard let endpoint = profile.directEndpoint,
-                  let credential = document.environmentCredentials[profile.environmentID.rawValue]
-            else {
-                installPlaceholder(profile: profile, state: .needsPairing)
-                continue
-            }
-            guard credential.expiresAt > .now else {
-                installPlaceholder(profile: profile, state: .needsPairing)
-                continue
-            }
-            let authorizer = DPoPHTTPAuthorizer(
-                accessToken: credential.accessToken,
-                signer: signer
-            )
-            let descriptor = try? await T3HTTPClient(
-                endpoint: endpoint,
-                authorizer: authorizer
-            ).fetchEnvironment()
-            guard descriptor?.environmentId == profile.environmentID.rawValue else {
-                installPlaceholder(profile: profile, state: .incompatible(
-                    "The endpoint reports a different environment."
-                ))
-                continue
-            }
-            coordinator.register(
-                profile: profile,
-                descriptor: descriptor,
-                endpoint: endpoint,
-                authorizer: authorizer
-            )
         }
         configureT3Connect()
         for profile in profiles where profile.source == .direct && profile.enabled {
@@ -772,7 +815,7 @@ final class AgentStore {
     }
 
     var canImportT3Connect: Bool {
-        T3ConnectConfiguration.load() != nil
+        t3ConnectConfiguration != nil
             && {
                 if case .signedIn = t3ConnectDetection { return true }
                 return false
@@ -796,7 +839,7 @@ final class AgentStore {
     var hasImportedT3Connect: Bool { t3ConnectClient != nil }
 
     var showsT3Connect: Bool {
-        guard T3ConnectConfiguration.load() != nil else { return hasImportedT3Connect }
+        guard t3ConnectConfiguration != nil else { return hasImportedT3Connect }
         return switch t3ConnectDetection {
         case .signedIn, .unsafePermissions, .incompatible:
             true
@@ -830,16 +873,35 @@ final class AgentStore {
     }
 
     func refreshT3ConnectDetection() {
-        guard T3ConnectConfiguration.load() != nil else {
+        Task { await refreshT3ConnectDetectionNow() }
+    }
+
+    private func refreshT3ConnectDetectionNow() async {
+        let importer = t3ConnectImporter
+        let vault = remoteVault
+        let result = await Task.detached(priority: .utility) {
+            let configuration = T3ConnectConfiguration.load()
+            guard configuration != nil else {
+                return (
+                    configuration,
+                    T3ConnectSessionDetection.unavailable,
+                    Optional<ImportedT3ConnectCredential>.none
+                )
+            }
+            let detection = importer.detect()
+            let imported = try? vault.document().importedT3Connect
+            return (configuration, detection, imported)
+        }.value
+
+        t3ConnectConfiguration = result.0
+        guard result.0 != nil else {
             t3ConnectDetection = .unavailable
             return
         }
-        t3ConnectDetection = t3ConnectImporter.detect()
+        t3ConnectDetection = result.1
         switch t3ConnectDetection {
         case let .signedIn(ciphertextFingerprint):
-            if let document = try? remoteVault.document(),
-               let imported = document.importedT3Connect
-            {
+            if let imported = result.2 {
                 t3ConnectSessionUpdateAvailable =
                     imported.ciphertextFingerprint != ciphertextFingerprint
             } else {
@@ -847,9 +909,7 @@ final class AgentStore {
             }
         case .signedOut, .unavailable:
             t3ConnectSessionUpdateAvailable = false
-            if let document = try? remoteVault.document(),
-               document.importedT3Connect != nil
-            {
+            if result.2 != nil {
                 purgeImportedT3ConnectAfterLogout()
             }
         case .unsafePermissions, .incompatible:
@@ -881,6 +941,7 @@ final class AgentStore {
             allowsInsecureHTTP: allowsInsecureHTTP
         )
         try profileStore.upsert(result.profile)
+        t3ConnectEnabledStates[result.profile.environmentID] = result.profile.enabled
         try remoteVault.update {
             $0.environmentCredentials[result.profile.environmentID.rawValue] = result.credential
         }
@@ -905,6 +966,7 @@ final class AgentStore {
         profile.enabled = enabled
         do {
             try profileStore.upsert(profile)
+            t3ConnectEnabledStates[environmentID] = enabled
             if enabled {
                 Task { await restoreRemoteMachines() }
             } else {
@@ -929,6 +991,7 @@ final class AgentStore {
             if var removedProfile, removedProfile.source == .t3Connect {
                 removedProfile.enabled = false
                 try profileStore.upsert(removedProfile)
+                t3ConnectEnabledStates[environmentID] = false
                 try remoteVault.removeEnvironment(environmentID)
                 retainedRemoteCompletions.removeValue(forKey: environmentID)
                 knownProjectsByEnvironment.removeValue(forKey: environmentID)
@@ -939,6 +1002,7 @@ final class AgentStore {
                 return
             }
             try profileStore.remove(environmentID)
+            t3ConnectEnabledStates.removeValue(forKey: environmentID)
             try remoteVault.removeEnvironment(environmentID)
             coordinator.remove(environmentID)
             snapshotsByEnvironment.removeValue(forKey: environmentID)
@@ -949,6 +1013,9 @@ final class AgentStore {
     }
 
     func unlockRemoteCredentials() async {
+        guard !isRemoteOperationRunning else { return }
+        isRemoteOperationRunning = true
+        defer { isRemoteOperationRunning = false }
         do {
             _ = try remoteVault.unlock()
             remoteVaultLocked = false
@@ -965,7 +1032,7 @@ final class AgentStore {
         do {
             let imported = try t3ConnectImporter.importSession()
             let signer = try await ensureDPoPSigner(allowsPrompt: true)
-            guard let configuration = T3ConnectConfiguration.load() else {
+            guard let configuration = t3ConnectConfiguration else {
                 throw T3ConnectError.invalidConfiguration
             }
             let client = T3ConnectClient(
@@ -1009,6 +1076,7 @@ final class AgentStore {
                         enabled: false
                     )
                 )
+                t3ConnectEnabledStates[environment.environmentID] = false
             }
         }
         UserDefaults.standard.removeObject(forKey: legacyExclusionKey)
@@ -1032,6 +1100,7 @@ final class AgentStore {
             )
             try profileStore.upsert(profile)
             profiles.append(profile)
+            t3ConnectEnabledStates[environment.environmentID] = false
         }
 
         t3ConnectEnvironments = environments
@@ -1049,7 +1118,14 @@ final class AgentStore {
                 {
                     continue
                 }
-                try await connectT3ConnectEnvironment(environment)
+                do {
+                    try await connectT3ConnectEnvironment(environment)
+                    t3ConnectEnabledStates[environment.environmentID] = true
+                } catch T3ConnectError.unauthorized {
+                    throw T3ConnectError.unauthorized
+                } catch {
+                    remoteOperationMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -1081,6 +1157,7 @@ final class AgentStore {
         let result = try await client.connect(environment)
         if !replacingDirectPath {
             try profileStore.upsert(result.profile)
+            t3ConnectEnabledStates[result.profile.environmentID] = result.profile.enabled
         }
         guard let endpoint = result.profile.directEndpoint else {
             throw T3ConnectError.invalidResponse
@@ -1097,12 +1174,16 @@ final class AgentStore {
     }
 
     func forgetT3Connect() async {
+        guard !isRemoteOperationRunning else { return }
+        isRemoteOperationRunning = true
+        defer { isRemoteOperationRunning = false }
         do {
             try await t3ConnectClient?.forget()
             t3ConnectClient = nil
             t3ConnectEnvironments = []
             for profile in profileStore.load() where profile.source == .t3Connect {
                 try profileStore.remove(profile.environmentID)
+                t3ConnectEnabledStates.removeValue(forKey: profile.environmentID)
                 coordinator.remove(profile.environmentID)
                 snapshotsByEnvironment.removeValue(forKey: profile.environmentID)
             }
@@ -1114,7 +1195,7 @@ final class AgentStore {
 
     private func configureT3Connect() {
         refreshT3ConnectDetection()
-        guard let configuration = T3ConnectConfiguration.load(),
+        guard let configuration = t3ConnectConfiguration,
               let signer = dpopSigner,
               let document = try? remoteVault.document(),
               document.importedT3Connect != nil
@@ -1181,37 +1262,29 @@ final class AgentStore {
     }
 
     private func attemptConnectFallback(_ environmentID: EnvironmentID) async {
-        guard t3ConnectClient != nil,
-              !connectFallbacksInFlight.contains(environmentID)
-        else {
-            return
-        }
-        connectFallbacksInFlight.insert(environmentID)
-        defer { connectFallbacksInFlight.remove(environmentID) }
-        do {
-            if !t3ConnectEnvironments.contains(where: { $0.environmentID == environmentID }) {
-                try await refreshT3ConnectEnvironments(connectEnabled: false)
-            }
-            guard let environment = t3ConnectEnvironments.first(where: {
-                $0.environmentID == environmentID
-            }) else {
-                return
-            }
-            try await connectT3ConnectEnvironment(
-                environment,
-                replacingDirectPath: true
-            )
-            directFailureCounts[environmentID] = 0
-            directProbeSuccesses[environmentID] = 0
-        } catch T3ConnectError.unauthorized {
-            purgeImportedT3ConnectAfterLogout()
-        } catch {
-            // The direct session remains visible as offline. A future poll or
-            // maintenance refresh retries without disturbing local monitoring.
-        }
+        await recoverT3ConnectEnvironment(
+            environmentID,
+            replacingDirectPath: true,
+            resetPathCounters: true
+        )
     }
 
     private func repairT3ConnectEnvironment(_ environmentID: EnvironmentID) async {
+        let hasDirect = profileStore.load().contains {
+            $0.environmentID == environmentID && $0.source == .direct
+        }
+        await recoverT3ConnectEnvironment(
+            environmentID,
+            replacingDirectPath: hasDirect,
+            resetPathCounters: false
+        )
+    }
+
+    private func recoverT3ConnectEnvironment(
+        _ environmentID: EnvironmentID,
+        replacingDirectPath: Bool,
+        resetPathCounters: Bool
+    ) async {
         guard t3ConnectClient != nil,
               !connectFallbacksInFlight.contains(environmentID)
         else {
@@ -1228,17 +1301,19 @@ final class AgentStore {
             }) else {
                 return
             }
-            let hasDirect = profileStore.load().contains {
-                $0.environmentID == environmentID && $0.source == .direct
-            }
             try await connectT3ConnectEnvironment(
                 environment,
-                replacingDirectPath: hasDirect
+                replacingDirectPath: replacingDirectPath
             )
+            if resetPathCounters {
+                directFailureCounts[environmentID] = 0
+                directProbeSuccesses[environmentID] = 0
+            }
         } catch T3ConnectError.unauthorized {
             purgeImportedT3ConnectAfterLogout()
         } catch {
-            // The machine stays offline until the next maintenance refresh.
+            // The current path remains visible as offline. A future poll or
+            // maintenance refresh retries without blocking local monitoring.
         }
     }
 
@@ -1300,6 +1375,14 @@ final class AgentStore {
 
     /// Called on wake, network restoration, and the menu-bar reconnect command.
     /// Local polling is independent, so a Connect outage cannot suppress this.
+    func handleConnectivityAvailable() {
+        if connectionState == .unauthorized || needsOnboarding {
+            bootstrap()
+        } else {
+            handleConnectivityRestored()
+        }
+    }
+
     func handleConnectivityRestored() {
         coordinator.reconnect()
         Task { await performRemoteMaintenance() }
@@ -1308,7 +1391,7 @@ final class AgentStore {
     /// Refreshes Connect inventory and probes any direct path currently using a
     /// relay fallback. AppDelegate runs this every 60 seconds.
     func performRemoteMaintenance() async {
-        refreshT3ConnectDetection()
+        await refreshT3ConnectDetectionNow()
         if t3ConnectClient != nil {
             do {
                 try await refreshT3ConnectEnvironments(connectEnabled: true)
@@ -1323,7 +1406,7 @@ final class AgentStore {
     }
 
     func isT3ConnectEnvironmentEnabled(_ environmentID: EnvironmentID) -> Bool {
-        profileStore.load().first { $0.environmentID == environmentID }?.enabled ?? false
+        t3ConnectEnabledStates[environmentID] ?? false
     }
 
     func setT3ConnectEnvironmentEnabled(
@@ -1345,6 +1428,7 @@ final class AgentStore {
         )
         do {
             try profileStore.upsert(profile)
+            t3ConnectEnabledStates[environment.environmentID] = enabled
             if enabled {
                 Task {
                     do {
@@ -1368,6 +1452,7 @@ final class AgentStore {
         for profile in profileStore.load() where profile.source == .t3Connect {
             guard profile.environmentID == localEnvironmentID else { continue }
             try? profileStore.remove(profile.environmentID)
+            t3ConnectEnabledStates.removeValue(forKey: profile.environmentID)
             try? remoteVault.removeEnvironment(profile.environmentID)
             coordinator.remove(profile.environmentID)
             snapshotsByEnvironment.removeValue(forKey: profile.environmentID)
@@ -1499,11 +1584,14 @@ final class AgentStore {
                     onboardingMessage = "Session expired. Paste a new bearer token."
                 }
             }
-            await updateAccessPathHealth(snapshot)
-            if snapshot.profile.source == .t3Connect,
-               snapshot.connectionState == .unauthorized
-            {
-                await repairT3ConnectEnvironment(snapshot.profile.environmentID)
+            Task { [weak self] in
+                guard let self else { return }
+                await updateAccessPathHealth(snapshot)
+                if snapshot.profile.source == .t3Connect,
+                   snapshot.connectionState == .unauthorized
+                {
+                    await repairT3ConnectEnvironment(snapshot.profile.environmentID)
+                }
             }
             rebuildFlattenedWorld()
             await applyCombinedShell(changedEnvironment: snapshot.profile.environmentID)
@@ -1543,10 +1631,12 @@ final class AgentStore {
 
         var retained = retainedRemoteCompletions[environmentID] ?? [:]
         let previousByID = Dictionary(
-            uniqueKeysWithValues: previousShell.threads.map { ($0.id, $0) }
+            previousShell.threads.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
         )
         let incomingByID = Dictionary(
-            uniqueKeysWithValues: incomingShell.threads.map { ($0.id, $0) }
+            incomingShell.threads.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
         )
 
         // A new run in the same thread supersedes an older retained result.

@@ -195,7 +195,12 @@ public actor RemotePairingClient {
         guard (200..<300).contains(http.statusCode) else {
             throw RemotePairingError.tokenRejected
         }
-        let token = try JSONDecoder().decode(TokenResponse.self, from: data)
+        let token: TokenResponse
+        do {
+            token = try JSONDecoder().decode(TokenResponse.self, from: data)
+        } catch {
+            throw RemotePairingError.malformedResponse
+        }
         guard token.tokenType == "DPoP" else {
             throw RemotePairingError.unexpectedTokenType
         }
@@ -255,9 +260,7 @@ public actor RemotePairingClient {
     }
 
     private static func formEncoded(_ fields: [(String, String)]) -> Data {
-        var components = URLComponents()
-        components.queryItems = fields.map(URLQueryItem.init)
-        return Data((components.percentEncodedQuery ?? "").utf8)
+        FormURLEncoding.data(fields)
     }
 }
 

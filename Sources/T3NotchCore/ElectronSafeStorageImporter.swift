@@ -66,6 +66,12 @@ public struct ElectronSafeStorageImporter: Sendable {
         }
         do {
             let encrypted = try readEncryptedRecord()
+            guard encrypted.hasPrefix("enc:"),
+                  let bytes = Data(base64Encoded: String(encrypted.dropFirst(4))),
+                  bytes.starts(with: Data("v10".utf8))
+            else {
+                throw ElectronSafeStorageError.formatUnsupported
+            }
             let fingerprint = Self.sha256(encrypted)
             return .signedIn(ciphertextFingerprint: fingerprint)
         } catch ElectronSafeStorageError.unsafePermissions {

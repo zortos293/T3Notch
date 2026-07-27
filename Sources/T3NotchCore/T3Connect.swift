@@ -55,9 +55,42 @@ public struct T3ConnectConfiguration: Sendable, Equatable {
         else {
             return nil
         }
-        host = host.trimmingCharacters(in: CharacterSet(charactersIn: "$"))
-        guard !host.contains("/"), !host.isEmpty else { return nil }
-        return URL(string: "https://\(host)/")
+        host = host.trimmingCharacters(in: CharacterSet(charactersIn: "$")).lowercased()
+        guard Self.isValidASCIIHostname(host) else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/"
+        guard let url = components.url, url.host?.lowercased() == host else {
+            return nil
+        }
+        return url
+    }
+
+    private static func isValidASCIIHostname(_ host: String) -> Bool {
+        guard !host.isEmpty, host.utf8.count <= 253, host.last != "." else {
+            return false
+        }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty else { return false }
+        return labels.allSatisfy { label in
+            guard !label.isEmpty,
+                  label.utf8.count <= 63,
+                  let first = label.utf8.first,
+                  let last = label.utf8.last,
+                  Self.isASCIIAlphanumeric(first),
+                  Self.isASCIIAlphanumeric(last)
+            else {
+                return false
+            }
+            return label.utf8.allSatisfy {
+                Self.isASCIIAlphanumeric($0) || $0 == 45
+            }
+        }
+    }
+
+    private static func isASCIIAlphanumeric(_ byte: UInt8) -> Bool {
+        (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57)
     }
 }
 
@@ -447,9 +480,7 @@ public actor T3ConnectClient {
     }
 
     private static func formEncoded(_ fields: [(String, String)]) -> Data {
-        var components = URLComponents()
-        components.queryItems = fields.map { URLQueryItem(name: $0.0, value: $0.1) }
-        return Data((components.percentEncodedQuery ?? "").utf8)
+        FormURLEncoding.data(fields)
     }
 
     private static func decodeBase64URL(_ value: String) -> Data? {

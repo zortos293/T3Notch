@@ -259,34 +259,35 @@ private struct ThreadCardDeck: View {
                                     .tracking(0.5)
                                     .lineLimit(1)
                             }
-                            LazyVGrid(
-                                columns: Array(
-                                    repeating: GridItem(
-                                        .fixed(NotchGeometry.cardWidth),
-                                        spacing: NotchGeometry.cardSpacing,
-                                        alignment: .top
-                                    ),
-                                    count: NotchGeometry.maxCardsPerRow
-                                ),
-                                alignment: .leading,
-                                spacing: 5
+                            Grid(
+                                alignment: .topLeading,
+                                horizontalSpacing: NotchGeometry.cardSpacing,
+                                verticalSpacing: 5
                             ) {
-                                ForEach(group.threads) { thread in
-                                    ThreadCard(
-                                        store: store,
-                                        thread: thread,
-                                        isSelected: thread.id == store.focusedThread?.id
-                                    )
-                                    .transition(
-                                        .asymmetric(
-                                            insertion: .opacity.combined(
-                                                with: .scale(scale: 0.96)
-                                            ),
-                                            removal: .opacity.combined(
-                                                with: .scale(scale: 0.9)
+                                ForEach(
+                                    Array(threadRows(group.threads).enumerated()),
+                                    id: \.offset
+                                ) { _, row in
+                                    GridRow {
+                                        ForEach(row) { thread in
+                                            ThreadCard(
+                                                store: store,
+                                                thread: thread,
+                                                isSelected: thread.id
+                                                    == store.focusedThread?.id
                                             )
-                                        )
-                                    )
+                                            .transition(
+                                                .asymmetric(
+                                                    insertion: .opacity.combined(
+                                                        with: .scale(scale: 0.96)
+                                                    ),
+                                                    removal: .opacity.combined(
+                                                        with: .scale(scale: 0.9)
+                                                    )
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
                             }
                             .animation(
@@ -297,6 +298,12 @@ private struct ThreadCardDeck: View {
                     }
                 }
             }
+        }
+    }
+
+    private func threadRows(_ threads: [ThreadShell]) -> [[ThreadShell]] {
+        stride(from: 0, to: threads.count, by: NotchGeometry.maxCardsPerRow).map {
+            Array(threads[$0..<min($0 + NotchGeometry.maxCardsPerRow, threads.count)])
         }
     }
 }
@@ -353,7 +360,11 @@ private struct ThreadCard: View {
                         Circle()
                             .fill(statusColor(phase))
                             .frame(width: 5, height: 5)
-                        Text(headline(for: phase))
+                        Text(
+                            phase == .completed
+                                ? "Done · Dismiss"
+                                : headline(for: phase)
+                        )
                             .font(.system(size: 9, weight: .semibold, design: .rounded))
                             .foregroundStyle(statusColor(phase))
                             .lineLimit(1)
@@ -386,6 +397,11 @@ private struct ThreadCard: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityHint(
+            phase == .completed
+                ? "Dismisses this completed thread."
+                : "Shows this thread."
+        )
     }
 
     private func statusColor(_ phase: AgentAwarenessPhase) -> Color {

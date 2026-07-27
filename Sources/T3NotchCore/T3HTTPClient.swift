@@ -65,12 +65,13 @@ public actor DPoPHTTPAuthorizer: HTTPAuthorizer {
     public func authorize(_ request: URLRequest) async throws -> URLRequest {
         guard let url = request.url else { throw T3HTTPError.invalidURL }
         var request = request
+        let token = accessToken
         let proof = try await signer.createProof(
             method: request.httpMethod ?? "GET",
             url: url,
-            accessToken: accessToken
+            accessToken: token
         )
-        request.setValue("DPoP \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("DPoP \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(proof, forHTTPHeaderField: "DPoP")
         return request
     }

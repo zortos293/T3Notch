@@ -3,24 +3,74 @@ import os
 
 public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     private final class Session: @unchecked Sendable {
-        var profile: EnvironmentProfile
-        var descriptor: EnvironmentDescriptor?
-        var endpoint: ServerEndpoint
-        var state: EnvironmentConnectionState = .connecting
-        var shell: ShellSnapshot?
+        private struct Data {
+            var profile: EnvironmentProfile
+            var descriptor: EnvironmentDescriptor?
+            var state: EnvironmentConnectionState = .connecting
+            var shell: ShellSnapshot?
+            var shellTask: Task<Void, Never>?
+        }
+
+        private let data: OSAllocatedUnfairLock<Data>
         let transport: PollingTransport
-        var shellTask: Task<Void, Never>?
 
         init(
             profile: EnvironmentProfile,
             descriptor: EnvironmentDescriptor?,
-            endpoint: ServerEndpoint,
             transport: PollingTransport
         ) {
-            self.profile = profile
-            self.descriptor = descriptor
-            self.endpoint = endpoint
+            data = OSAllocatedUnfairLock(initialState: Data(
+                profile: profile,
+                descriptor: descriptor
+            ))
             self.transport = transport
+        }
+
+        var source: EnvironmentSource {
+            data.withLock { $0.profile.source }
+        }
+
+        func updateProfile(_ profile: EnvironmentProfile) {
+            data.withLock { $0.profile = profile }
+        }
+
+        func updateState(_ state: EnvironmentConnectionState) {
+            data.withLock { $0.state = state }
+        }
+
+        func updateShell(_ shell: ShellSnapshot) {
+            data.withLock {
+                $0.shell = shell
+                $0.state = .connected
+            }
+        }
+
+        func installShellTask(_ task: Task<Void, Never>) {
+            let previous = data.withLock { data -> Task<Void, Never>? in
+                let previous = data.shellTask
+                data.shellTask = task
+                return previous
+            }
+            previous?.cancel()
+        }
+
+        func cancelShellTask() {
+            data.withLock { data -> Task<Void, Never>? in
+                defer { data.shellTask = nil }
+                return data.shellTask
+            }?.cancel()
+        }
+
+        func snapshot() -> EnvironmentSnapshot {
+            data.withLock {
+                EnvironmentSnapshot(
+                    profile: $0.profile,
+                    descriptor: $0.descriptor,
+                    connectionState: $0.state,
+                    activeAccessPath: $0.profile.source,
+                    shell: $0.shell
+                )
+            }
         }
     }
 
@@ -29,6 +79,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         var focused: ScopedThreadID?
         var expanded = false
         var detailTask: Task<Void, Never>?
+        var detailGeneration = 0
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -51,7 +102,6 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         endpoint: ServerEndpoint,
         authorizer: any HTTPAuthorizer
     ) {
-        remove(profile.environmentID, emitEvent: false)
         let client = T3HTTPClient(endpoint: endpoint, authorizer: authorizer)
         let transport = PollingTransport(
             client: client,
@@ -60,42 +110,46 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         let session = Session(
             profile: profile,
             descriptor: descriptor,
-            endpoint: endpoint,
             transport: transport
         )
         transport.onConnectionStateChange = { [weak self, weak session] state in
             guard let self, let session else { return }
-            session.state = switch state {
+            let environmentState: EnvironmentConnectionState = switch state {
             case .connecting: .connecting
             case .connected: .connected
             case .disconnected: .offline(nil)
             case .unauthorized:
-                session.profile.source == .direct ? .needsPairing : .unauthorized
+                session.source == .direct ? .needsPairing : .unauthorized
             }
+            session.updateState(environmentState)
             self.emit(session)
         }
         transport.onRepeatedFailure = { [weak self, weak session] in
             guard let self, let session else { return }
             self.emit(session)
         }
-        let previous = state.withLock { state -> Session? in
+        let (previous, focused) = state.withLock {
+            state -> (Session?, ScopedThreadID?) in
             let previous = state.sessions.updateValue(session, forKey: profile.environmentID)
             session.transport.setExpanded(state.expanded)
             if state.focused?.environmentID == profile.environmentID {
                 session.transport.setFocusedThread(state.focused?.threadID)
             }
-            return previous
+            return (previous, state.focused)
         }
         previous?.transport.stop()
-        previous?.shellTask?.cancel()
+        previous?.cancelShellTask()
         emit(session)
-        session.shellTask = Task { [weak self, weak session] in
+        let shellTask = Task { [weak self, weak session] in
             guard let self, let session else { return }
             for await shell in transport.shell {
-                session.shell = shell
-                session.state = .connected
+                session.updateShell(shell)
                 self.emit(session)
             }
+        }
+        session.installShellTask(shellTask)
+        if focused?.environmentID == profile.environmentID {
+            setFocusedThread(focused)
         }
     }
 
@@ -108,9 +162,10 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     }
 
     public func setFocusedThread(_ focused: ScopedThreadID?) {
-        let detailSource: (PollingTransport, ScopedThreadID)? = state.withLock { state in
+        let detailSource: (PollingTransport, ScopedThreadID, Int)? = state.withLock { state in
             state.detailTask?.cancel()
             state.detailTask = nil
+            state.detailGeneration &+= 1
             state.focused = focused
             for (environmentID, session) in state.sessions {
                 session.transport.setFocusedThread(
@@ -120,15 +175,26 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
             guard let focused, let session = state.sessions[focused.environmentID] else {
                 return nil
             }
-            return (session.transport, focused)
+            return (session.transport, focused, state.detailGeneration)
         }
-        guard let (transport, focused) = detailSource else { return }
+        guard let (transport, focused, generation) = detailSource else { return }
         let task = Task { [weak self] in
             for await detail in transport.threadDetail(focused.threadID) {
                 self?.continuation.yield(.detail(focused, detail))
             }
         }
-        state.withLock { $0.detailTask = task }
+        let accepted = state.withLock { state -> Bool in
+            guard state.focused == focused,
+                  state.detailGeneration == generation
+            else {
+                return false
+            }
+            state.detailTask = task
+            return true
+        }
+        if !accepted {
+            task.cancel()
+        }
     }
 
     public func setExpanded(_ expanded: Bool) {
@@ -141,12 +207,17 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     }
 
     public func reconnect(_ environmentID: EnvironmentID? = nil) {
-        state.withLock { state in
+        let sessions = state.withLock { state -> [Session] in
+            var changed: [Session] = []
             for (id, session) in state.sessions where environmentID == nil || environmentID == id {
-                session.state = .connecting
+                session.updateState(.connecting)
                 session.transport.requestImmediatePoll()
-                emit(session)
+                changed.append(session)
             }
+            return changed
+        }
+        for session in sessions {
+            emit(session)
         }
     }
 
@@ -167,7 +238,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     public func updateProfile(_ profile: EnvironmentProfile) {
         let session = state.withLock { state -> Session? in
             guard let session = state.sessions[profile.environmentID] else { return nil }
-            session.profile = profile
+            session.updateProfile(profile)
             return session
         }
         if let session { emit(session) }
@@ -192,7 +263,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
             return values
         }
         for session in sessions {
-            session.shellTask?.cancel()
+            session.cancelShellTask()
             session.transport.stop()
         }
         continuation.finish()
@@ -207,7 +278,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
             }
             return state.sessions.removeValue(forKey: environmentID)
         }
-        removed?.shellTask?.cancel()
+        removed?.cancelShellTask()
         removed?.transport.stop()
         if emitEvent, removed != nil {
             continuation.yield(.removed(environmentID))
@@ -219,13 +290,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     }
 
     private func makeSnapshot(_ session: Session) -> EnvironmentSnapshot {
-        EnvironmentSnapshot(
-            profile: session.profile,
-            descriptor: session.descriptor,
-            connectionState: session.state,
-            activeAccessPath: session.profile.source,
-            shell: session.shell
-        )
+        session.snapshot()
     }
 
     private func sourcePriority(_ source: EnvironmentSource) -> Int {

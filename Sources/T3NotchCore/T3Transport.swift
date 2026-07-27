@@ -70,6 +70,8 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
         var connectionState: ConnectionState = .connecting
         var detailTasks: [String: Task<Void, Never>] = [:]
         var detailContinuations: [String: AsyncStream<ThreadDetailSnapshot>.Continuation] = [:]
+        var onConnectionStateChange: (@Sendable (ConnectionState) -> Void)?
+        var onRepeatedFailure: (@Sendable () -> Void)?
     }
 
     private let client: T3HTTPClient
@@ -80,11 +82,17 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
 
     private var shellTask: Task<Void, Never>?
 
-    public var onConnectionStateChange: (@Sendable (ConnectionState) -> Void)?
+    public var onConnectionStateChange: (@Sendable (ConnectionState) -> Void)? {
+        get { state.withLock(\.onConnectionStateChange) }
+        set { state.withLock { $0.onConnectionStateChange = newValue } }
+    }
     /// Called after a second and subsequent consecutive failure. Coordinators
     /// use this signal to apply path-failover thresholds without making the
     /// public connection state chatter on every backoff attempt.
-    public var onRepeatedFailure: (@Sendable () -> Void)?
+    public var onRepeatedFailure: (@Sendable () -> Void)? {
+        get { state.withLock(\.onRepeatedFailure) }
+        set { state.withLock { $0.onRepeatedFailure = newValue } }
+    }
 
     public var connectionState: ConnectionState {
         state.withLock(\.connectionState)
@@ -211,27 +219,15 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
                     setConnectionState(.unauthorized)
                 } else {
                     if !setConnectionState(.disconnected) {
-                        onRepeatedFailure?()
+                        state.withLock(\.onRepeatedFailure)?()
                     }
                 }
-                backoffNanos = min(
-                    max(backoffNanos * 2, 500_000_000),
-                    configuration.maximumBackoffNanoseconds
-                )
-                let delay = configuration.jitter(backoffNanos)
-                configuration.onBackoff(delay)
-                await sleepInterruptible(nanoseconds: delay)
+                await applyBackoff(&backoffNanos)
             } catch {
                 if !setConnectionState(.disconnected) {
-                    onRepeatedFailure?()
+                    state.withLock(\.onRepeatedFailure)?()
                 }
-                backoffNanos = min(
-                    max(backoffNanos * 2, 500_000_000),
-                    configuration.maximumBackoffNanoseconds
-                )
-                let delay = configuration.jitter(backoffNanos)
-                configuration.onBackoff(delay)
-                await sleepInterruptible(nanoseconds: delay)
+                await applyBackoff(&backoffNanos)
             }
         }
     }
@@ -249,7 +245,9 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
             // Only the focused thread's detail is ever displayed, so other
             // subscriptions idle instead of polling alongside it.
             if focused != threadId {
-                await configuration.sleep(configuration.idleDetailNanoseconds)
+                await sleepInterruptible(
+                    nanoseconds: configuration.idleDetailNanoseconds
+                )
                 continue
             }
 
@@ -264,7 +262,9 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
                     : configuration.idleDetailNanoseconds
                 await sleepInterruptible(nanoseconds: interval)
             } catch {
-                await configuration.sleep(configuration.idleDetailNanoseconds)
+                await sleepInterruptible(
+                    nanoseconds: configuration.idleDetailNanoseconds
+                )
             }
         }
         continuation.finish()
@@ -272,13 +272,14 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
 
     @discardableResult
     private func setConnectionState(_ newState: ConnectionState) -> Bool {
-        let changed = state.withLock { state -> Bool in
+        let (changed, callback) = state.withLock { state
+            -> (Bool, (@Sendable (ConnectionState) -> Void)?) in
             let changed = state.connectionState != newState
             state.connectionState = newState
-            return changed
+            return (changed, state.onConnectionStateChange)
         }
         if changed {
-            onConnectionStateChange?(newState)
+            callback?(newState)
         }
         return changed
     }
@@ -293,5 +294,15 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
             await configuration.sleep(step)
             remaining -= step
         }
+    }
+
+    private func applyBackoff(_ backoffNanos: inout UInt64) async {
+        backoffNanos = min(
+            max(backoffNanos * 2, 500_000_000),
+            configuration.maximumBackoffNanoseconds
+        )
+        let delay = configuration.jitter(backoffNanos)
+        configuration.onBackoff(delay)
+        await sleepInterruptible(nanoseconds: delay)
     }
 }

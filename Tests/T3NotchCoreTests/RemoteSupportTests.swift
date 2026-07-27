@@ -108,6 +108,17 @@ private final class Counter: @unchecked Sendable {
     var count: Int { lock.withLock { value } }
 }
 
+private final class BooleanFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.withLock { value = true }
+    }
+
+    var isSet: Bool { lock.withLock { value } }
+}
+
 @Suite("Remote support", .serialized)
 struct RemoteSupportTests {
     @Test func canonicalizesHTTPAndDerivesWebSocketEndpoint() throws {
@@ -123,6 +134,25 @@ struct RemoteSupportTests {
             try ServerEndpoint(
                 httpBaseURL: #require(URL(string: "https://user:secret@mini.example"))
             )
+        }
+    }
+
+    @Test func connectConfigurationRejectsNonHostnameClerkFrontends() throws {
+        let invalidHosts = [
+            "attacker.example?x=$",
+            "user@attacker.example$",
+            "-invalid.example$",
+            "invalid..example$",
+        ]
+        for host in invalidHosts {
+            let encoded = Data(host.utf8).base64URLEncodedString()
+            #expect(throws: T3ConnectError.self) {
+                try T3ConnectConfiguration(
+                    clerkPublishableKey: "pk_test_\(encoded)",
+                    clerkJWTTemplate: "t3-relay",
+                    relayURL: #require(URL(string: "https://relay.example/"))
+                )
+            }
         }
     }
 
@@ -175,7 +205,7 @@ struct RemoteSupportTests {
         }
     }
 
-    @Test func dpopProofCarriesNormalizedClaimsAndRawES256Signature() async throws {
+    @Test func dpopProofNormalizesHTUAndUsesRawES256Signature() async throws {
         let signer = try DPoPSigner()
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let token = "access-token"
@@ -194,7 +224,7 @@ struct RemoteSupportTests {
         #expect(header["alg"] as? String == "ES256")
         #expect((header["jwk"] as? [String: Any])?["crv"] as? String == "P-256")
         #expect(payload["htm"] as? String == "POST")
-        #expect(payload["htu"] as? String == "https://MINI.example:443/oauth/token")
+        #expect(payload["htu"] as? String == "https://mini.example/oauth/token")
         #expect(payload["iat"] as? Int == 1_800_000_000)
         #expect(payload["jti"] as? String == "11111111-2222-3333-4444-555555555555")
         let ath = Data(SHA256.hash(data: Data(token.utf8))).base64URLEncodedString()
@@ -267,7 +297,7 @@ struct RemoteSupportTests {
         try store.upsert(profile)
         #expect(store.load() == [profile])
         let bytes = try #require(defaults.data(forKey: "profiles"))
-        let serialized = String(decoding: bytes, as: UTF8.self)
+        let serialized = try #require(String(data: bytes, encoding: .utf8))
         #expect(!serialized.localizedCaseInsensitiveContains("token"))
         #expect(!serialized.localizedCaseInsensitiveContains("credential"))
         try store.remove(profile.environmentID)
@@ -300,6 +330,13 @@ struct RemoteSupportTests {
         )
         #expect(document.environmentCredentials["mini"]?.accessToken == "direct")
         #expect(document.connectEnvironmentCredentials["mini"]?.accessToken == "connect")
+        let roundTrip = try JSONDecoder().decode(
+            RemoteCredentialDocument.self,
+            from: JSONEncoder().encode(document)
+        )
+        #expect(roundTrip.version == RemoteCredentialDocument().version)
+        #expect(roundTrip.environmentCredentials["mini"]?.accessToken == "direct")
+        #expect(roundTrip.connectEnvironmentCredentials["mini"]?.accessToken == "connect")
     }
 
     @Test func electronV10FixtureDecryptsAndBadPaddingFailsClosed() throws {
@@ -348,6 +385,14 @@ struct RemoteSupportTests {
         } else {
             Issue.record("A safe recognized record should be detected without Keychain access")
         }
+
+        try Data(#"{"__clerk_client_jwt":"plaintext"}"#.utf8).write(to: file)
+        if case .incompatible = importer.detect() {
+            // expected
+        } else {
+            Issue.record("Unsupported token formats must be rejected during detection")
+        }
+        try Data(json.utf8).write(to: file)
 
         try FileManager.default.setAttributes(
             [.posixPermissions: NSNumber(value: Int16(0o666))],
@@ -419,7 +464,7 @@ struct RemoteSupportTests {
         ).pair(
             target: try RemotePairingTarget(
                 host: "https://mini.example",
-                pairingCode: "single-use-secret"
+                pairingCode: "single+use&secret"
             )
         )
         #expect(result.profile.environmentID == EnvironmentID("stable-mini"))
@@ -439,7 +484,7 @@ struct RemoteSupportTests {
             fields["subject_token_type"]
                 == "urn:t3:params:oauth:token-type:environment-bootstrap"
         )
-        #expect(fields["subject_token"] == "single-use-secret")
+        #expect(fields["subject_token"] == "single+use&secret")
         #expect(fields["scope"] == "orchestration:read orchestration:operate")
         #expect(fields["client_label"] == "T3Notch")
         #expect(fields["client_device_type"] == "desktop")
@@ -494,10 +539,14 @@ struct RemoteSupportTests {
             configuration: configuration
         )
         defer { transport.stop() }
-        for _ in 0..<30 {
+        for _ in 0..<250 {
             if backoffs.snapshot.count >= 3 { break }
             try await Task.sleep(for: .milliseconds(20))
         }
+        #expect(
+            backoffs.snapshot.count >= 3,
+            "Timed out waiting for three backoff samples"
+        )
         #expect(Array(backoffs.snapshot.prefix(3)) == [
             500_000_000,
             1_000_000_000,
@@ -608,6 +657,7 @@ struct RemoteSupportTests {
                 item.value.map { (item.name, $0) }
             }
         )
+        // Pinned to the versions in T3 Code's current Clerk/Electron client contract.
         #expect(clerkQueryValues["__clerk_api_version"] == "2026-05-12")
         #expect(clerkQueryValues["_clerk_js_version"] == "6.25.7")
         #expect(clerkQueryValues["_is_native"] == "1")
@@ -666,13 +716,15 @@ struct RemoteSupportTests {
             source: .t3Connect
         )
         let store = MemoryCredentialStore(document)
-        let mode = Counter()
+        let rejectClerkClient = BooleanFlag()
         let session = mockSession { request in
-            let firstAttempt = mode.increment() == 1
-            let status = firstAttempt ? 200 : 401
-            let body = firstAttempt
-                ? #"{"last_active_session_id":null,"sessions":[{"id":"session-1","status":"ended"}]}"#
-                : #"{"code":"unauthorized"}"#
+            guard request.url?.path == "/v1/client" else {
+                throw URLError(.badURL)
+            }
+            let status = rejectClerkClient.isSet ? 401 : 200
+            let body = rejectClerkClient.isSet
+                ? #"{"code":"unauthorized"}"#
+                : #"{"last_active_session_id":null,"sessions":[{"id":"session-1","status":"ended"}]}"#
             return (
                 HTTPURLResponse(
                     url: try #require(request.url),
@@ -696,7 +748,8 @@ struct RemoteSupportTests {
         } catch T3ConnectError.invalidClerkSession {
             // expected
         }
-        // Replace the first response with a Clerk 401.
+        // Move the Clerk client endpoint into its 401 phase.
+        rejectClerkClient.set()
         do {
             _ = try await client.listEnvironments()
             Issue.record("A Clerk 401 must require import again")
@@ -841,11 +894,22 @@ private func jsonObject(_ encoded: String) throws -> [String: Any] {
 }
 
 private func formFields(_ data: Data) -> [String: String] {
-    let components = URLComponents(string: "?\(String(decoding: data, as: UTF8.self))")
+    guard let body = String(data: data, encoding: .utf8) else { return [:] }
     return Dictionary(
-        uniqueKeysWithValues: (components?.queryItems ?? []).compactMap { item in
-            item.value.map { (item.name, $0) }
-        }
+        body.split(separator: "&").compactMap { field -> (String, String)? in
+            let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2 else { return nil }
+            func decode(_ value: Substring) -> String? {
+                String(value)
+                    .replacingOccurrences(of: "+", with: " ")
+                    .removingPercentEncoding
+            }
+            guard let name = decode(pair[0]), let value = decode(pair[1]) else {
+                return nil
+            }
+            return (name, value)
+        },
+        uniquingKeysWith: { _, latest in latest }
     )
 }
 

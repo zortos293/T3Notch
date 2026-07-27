@@ -73,10 +73,17 @@ public actor DPoPSigner {
         jti: UUID = UUID()
     ) throws -> String {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme != nil,
-              components.host != nil
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased()
         else {
             throw DPoPError.invalidURL
+        }
+        components.scheme = scheme
+        components.host = host
+        if (scheme == "https" && components.port == 443)
+            || (scheme == "http" && components.port == 80)
+        {
+            components.port = nil
         }
         components.query = nil
         components.fragment = nil

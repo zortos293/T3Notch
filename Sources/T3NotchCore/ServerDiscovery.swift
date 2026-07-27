@@ -17,6 +17,10 @@ public enum ServerEndpointError: Error, LocalizedError, Sendable {
 public struct ServerEndpoint: Codable, Sendable, Equatable, Hashable {
     public let httpBaseURL: URL
 
+    private enum CodingKeys: String, CodingKey {
+        case httpBaseURL
+    }
+
     public init(httpBaseURL: URL) throws {
         guard let scheme = httpBaseURL.scheme?.lowercased(),
               scheme == "http" || scheme == "https"
@@ -52,6 +56,16 @@ public struct ServerEndpoint: Codable, Sendable, Equatable, Hashable {
         components.port = port
         components.path = "/"
         self.httpBaseURL = components.url!
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(httpBaseURL: container.decode(URL.self, forKey: .httpBaseURL))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(httpBaseURL, forKey: .httpBaseURL)
     }
 
     public var host: String { httpBaseURL.host ?? "" }

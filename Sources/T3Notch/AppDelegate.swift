@@ -1,5 +1,6 @@
 import AppKit
 import Network
+import os
 import SwiftUI
 
 @MainActor
@@ -17,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let networkMonitorQueue = DispatchQueue(
         label: "gg.t3tools.t3notch.network-monitor"
     )
-    private var networkWasSatisfied = true
+    private let networkSatisfaction = OSAllocatedUnfairLock(initialState: true)
     private var remoteRefreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -84,14 +85,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
-        networkMonitor.pathUpdateHandler = { [weak self] path in
+        let satisfaction = networkSatisfaction
+        networkMonitor.pathUpdateHandler = { [weak self, satisfaction] path in
+            let isSatisfied = path.status == .satisfied
+            let restored = satisfaction.withLock { wasSatisfied in
+                defer { wasSatisfied = isSatisfied }
+                return isSatisfied && !wasSatisfied
+            }
+            guard restored else { return }
             Task { @MainActor in
-                guard let self else { return }
-                let isSatisfied = path.status == .satisfied
-                if isSatisfied && !self.networkWasSatisfied {
-                    self.store.handleConnectivityRestored()
-                }
-                self.networkWasSatisfied = isSatisfied
+                self?.store.handleConnectivityAvailable()
             }
         }
         networkMonitor.start(queue: networkMonitorQueue)
@@ -106,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func macDidWake() {
-        store.handleConnectivityRestored()
+        store.handleConnectivityAvailable()
     }
 
     private func installStatusItem() {
@@ -297,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reconnect() {
-        store.handleConnectivityRestored()
+        store.handleConnectivityAvailable()
     }
 
     @objc private func quit() {

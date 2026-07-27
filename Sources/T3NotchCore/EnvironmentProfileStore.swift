@@ -19,35 +19,47 @@ public final class EnvironmentProfileStore: @unchecked Sendable {
     }
 
     public func load() -> [EnvironmentProfile] {
-        lock.withLock {
-            guard let data = defaults.data(forKey: key),
-                  let document = try? JSONDecoder().decode(Document.self, from: data),
-                  document.version == 1
-            else {
-                return []
-            }
-            return document.profiles
-        }
+        lock.withLock { loadUnlocked() }
     }
 
     public func save(_ profiles: [EnvironmentProfile]) throws {
-        try lock.withLock {
-            let data = try JSONEncoder().encode(Document(profiles: profiles))
-            defaults.set(data, forKey: key)
-        }
+        try lock.withLock { try saveUnlocked(profiles) }
     }
 
     public func upsert(_ profile: EnvironmentProfile) throws {
-        var profiles = load()
-        if let index = profiles.firstIndex(where: { $0.environmentID == profile.environmentID }) {
-            profiles[index] = profile
-        } else {
-            profiles.append(profile)
+        try lock.withLock {
+            var profiles = loadUnlocked()
+            if let index = profiles.firstIndex(where: {
+                $0.environmentID == profile.environmentID
+            }) {
+                profiles[index] = profile
+            } else {
+                profiles.append(profile)
+            }
+            try saveUnlocked(profiles)
         }
-        try save(profiles)
     }
 
     public func remove(_ environmentID: EnvironmentID) throws {
-        try save(load().filter { $0.environmentID != environmentID })
+        try lock.withLock {
+            try saveUnlocked(
+                loadUnlocked().filter { $0.environmentID != environmentID }
+            )
+        }
+    }
+
+    private func loadUnlocked() -> [EnvironmentProfile] {
+        guard let data = defaults.data(forKey: key),
+              let document = try? JSONDecoder().decode(Document.self, from: data),
+              document.version == 1
+        else {
+            return []
+        }
+        return document.profiles
+    }
+
+    private func saveUnlocked(_ profiles: [EnvironmentProfile]) throws {
+        let data = try JSONEncoder().encode(Document(profiles: profiles))
+        defaults.set(data, forKey: key)
     }
 }

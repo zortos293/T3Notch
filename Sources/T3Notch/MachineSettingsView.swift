@@ -2,12 +2,18 @@ import SwiftUI
 import T3NotchCore
 
 struct MachineSettingsCard: View {
+    private enum PresentedSheet: String, Identifiable {
+        case pairing
+        case connectImport
+        case connectPermissionWarning
+
+        var id: String { rawValue }
+    }
+
     @Bindable var store: AgentStore
     let onShowQuickStart: () -> Void
 
-    @State private var showingPairing = false
-    @State private var showingConnectImport = false
-    @State private var showingConnectPermissionWarning = false
+    @State private var presentedSheet: PresentedSheet?
     @State private var removalTarget: EnvironmentSnapshot?
     @State private var copiedPermissionFix = false
 
@@ -34,7 +40,7 @@ struct MachineSettingsCard: View {
                 "Add a machine",
                 detail: "Pair over HTTPS, Tailscale, or a trusted local network."
             ) {
-                PillButton("Add…") { showingPairing = true }
+                PillButton("Add…") { presentedSheet = .pairing }
             }
 
             if store.remoteVaultLocked {
@@ -47,6 +53,7 @@ struct MachineSettingsCard: View {
                     PillButton("Unlock") {
                         Task { await store.unlockRemoteCredentials() }
                     }
+                    .disabled(store.isRemoteOperationRunning)
                 }
             }
 
@@ -78,19 +85,20 @@ struct MachineSettingsCard: View {
                 PillButton("Show", action: onShowQuickStart)
             }
         }
-        .sheet(isPresented: $showingPairing) {
-            RemotePairingSheet(store: store)
-        }
-        .sheet(isPresented: $showingConnectImport) {
-            T3ConnectImportSheet(store: store)
-        }
-        .sheet(isPresented: $showingConnectPermissionWarning) {
-            T3ConnectPermissionWarningSheet {
-                store.copyT3ConnectPermissionFix()
-                copiedPermissionFix = true
-                Task {
-                    try? await Task.sleep(for: .seconds(1.5))
-                    copiedPermissionFix = false
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .pairing:
+                RemotePairingSheet(store: store)
+            case .connectImport:
+                T3ConnectImportSheet(store: store)
+            case .connectPermissionWarning:
+                T3ConnectPermissionWarningSheet {
+                    store.copyT3ConnectPermissionFix()
+                    copiedPermissionFix = true
+                    Task {
+                        try? await Task.sleep(for: .seconds(1.5))
+                        copiedPermissionFix = false
+                    }
                 }
             }
         }
@@ -123,7 +131,7 @@ struct MachineSettingsCard: View {
     @ViewBuilder
     private func machineRow(_ machine: EnvironmentSnapshot, isLocal: Bool) -> some View {
         SettingsRow(
-            machine.descriptor?.label?.nilIfEmpty ?? machine.profile.label,
+            machine.descriptor?.label?.nilIfBlank ?? machine.profile.label,
             detail: machineDetail(machine),
             detailIsProblem: machine.connectionState.isProblem
         ) {
@@ -160,7 +168,7 @@ struct MachineSettingsCard: View {
                         } else {
                             switch machine.connectionState {
                             case .needsPairing, .unauthorized:
-                                showingPairing = true
+                                presentedSheet = .pairing
                             case .credentialLocked:
                                 Task { await store.unlockRemoteCredentials() }
                             default:
@@ -199,8 +207,9 @@ struct MachineSettingsCard: View {
                 if store.hasImportedT3Connect {
                     if store.t3ConnectSessionUpdateAvailable {
                         PillButton("Import again…") {
-                            showingConnectImport = true
+                            presentedSheet = .connectImport
                         }
+                        .disabled(store.isRemoteOperationRunning)
                     }
                     PillButton(store.isRemoteOperationRunning ? "Refreshing…" : "Refresh") {
                         Task { await store.refreshT3Connect() }
@@ -209,14 +218,17 @@ struct MachineSettingsCard: View {
                     PillButton("Forget") {
                         Task { await store.forgetT3Connect() }
                     }
+                    .disabled(store.isRemoteOperationRunning)
                 } else if store.canImportT3Connect {
                     PillButton("Import…") {
-                        showingConnectImport = true
+                        presentedSheet = .connectImport
                     }
+                    .disabled(store.isRemoteOperationRunning)
                 } else if store.canRepairT3ConnectPermissions {
                     PillButton(copiedPermissionFix ? "Copied" : "Copy fix") {
-                        showingConnectPermissionWarning = true
+                        presentedSheet = .connectPermissionWarning
                     }
+                    .disabled(store.isRemoteOperationRunning)
                     PillButton("Refresh") {
                         store.refreshT3ConnectDetection()
                     }

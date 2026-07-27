@@ -100,6 +100,7 @@ public final class RemoteCredentialVault: RemoteCredentialStoring, @unchecked Se
     public static let account = "remote-credential-vault-v1"
 
     private let lock = NSLock()
+    private let mutationLock = NSLock()
     private var cached: RemoteCredentialDocument?
 
     public init() {}
@@ -122,17 +123,20 @@ public final class RemoteCredentialVault: RemoteCredentialStoring, @unchecked Se
     public func update(
         _ transform: (inout RemoteCredentialDocument) throws -> Void
     ) throws {
-        var document: RemoteCredentialDocument
-        do {
-            document = try self.document()
-        } catch RemoteCredentialVaultError.unexpectedStatus(errSecItemNotFound) {
-            document = RemoteCredentialDocument()
+        try mutationLock.withLock {
+            var document = try self.document()
+            try transform(&document)
+            try saveUnlocked(document)
         }
-        try transform(&document)
-        try save(document)
     }
 
     public func save(_ document: RemoteCredentialDocument) throws {
+        try mutationLock.withLock {
+            try saveUnlocked(document)
+        }
+    }
+
+    private func saveUnlocked(_ document: RemoteCredentialDocument) throws {
         let data = try JSONEncoder().encode(document)
         let query = baseQuery
         var attributes = query
