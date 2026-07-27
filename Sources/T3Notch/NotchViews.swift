@@ -220,11 +220,9 @@ private struct ThreadCardDeck: View {
     }
 
     var body: some View {
+        // No heading and no count: the strip above already says how many are
+        // running, and the project names label the cards well enough.
         VStack(alignment: .leading, spacing: 6) {
-            // No count here: the top strip already carries one, level with the
-            // clock, and two of them a centimetre apart just read as a mistake.
-            SectionLabel("Agents")
-
             ForEach(groups, id: \.project.id) { group in
                 VStack(alignment: .leading, spacing: 5) {
                     if groups.count > 1 {
