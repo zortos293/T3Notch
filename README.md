@@ -72,15 +72,11 @@ for a few seconds — because these moments arrive exactly when nobody is hoveri
 
 ### Control panel
 
-![The control panel](docs/settings.png)
-
 ### First launch
 
 The first run is a short tour, and the notch performs it rather than being described
 in the abstract. A pretend agent moves in above the window and works through a plan
 while you read, so every claim on screen is visible a few centimetres higher.
-
-![The first-launch quick start](docs/quickstart.png)
 
 It then asks a question, in the notch, and waits — answering it there is how the
 tour advances, and a second question slides in behind the first to show the queue.
@@ -90,8 +86,6 @@ panel over to that agent, which is the whole trick of running several at once.
 
 The tour ends on a connection test that is not a mock: every step makes the request
 it describes, and failures print what came back along with the command to fix it.
-
-![The connection test at the end of the tour](docs/quickstart-check.png)
 
 Nothing in the walkthrough touches your real agents — polling is suspended for as
 long as the window is open, and the pretend ones are discarded when it closes. They
@@ -218,8 +212,6 @@ leave a resolved approval looking pending. Commands are unwrapped from the
 relative to the worktree.
 
 ### Finished agents
-
-![A finished agent, pinned until it is reviewed](docs/done.png)
 
 A finished agent stays pinned as a Done card until it is reviewed, rather than
 flashing past. Its review bar sits at the foot of the panel, under what the agent
