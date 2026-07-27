@@ -7,6 +7,9 @@ export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Develope
 cd "$ROOT"
 
 CONFIG="${1:-release}"
+# Releases set this so the bundle's version matches the tag.
+VERSION="${VERSION:-1.0.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 PRODUCT_DIR="$ROOT/.build/$CONFIG"
 APP_NAME="T3Notch"
 APP_DIR="$ROOT/dist/${APP_NAME}.app"
@@ -60,9 +63,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>__VERSION__</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>__BUILD_NUMBER__</string>
   <key>LSMinimumSystemVersion</key>
   <string>26.0</string>
   <key>LSUIElement</key>
@@ -74,6 +77,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Substituted after the fact so the plist above stays a literal heredoc.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+  -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP_DIR/Contents/Info.plist" >/dev/null
+echo "==> Version ${VERSION} (${BUILD_NUMBER})"
 
 echo "==> Ad-hoc codesign"
 codesign --force --deep --sign - "$APP_DIR"
