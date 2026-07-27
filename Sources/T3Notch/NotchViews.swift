@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import T3NotchCore
 
@@ -1146,6 +1147,8 @@ private struct OnboardingView: View {
     @Bindable var store: AgentStore
     @State private var token = ""
 
+    private let tokenCommand = "npx -y t3@latest auth session issue --token-only"
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Connect to T3 Code")
@@ -1158,13 +1161,28 @@ private struct OnboardingView: View {
             TextField("Bearer token", text: $token)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 10, design: .monospaced))
-            Button("Connect") { store.submitManualToken(token) }
+            HStack(spacing: 8) {
+                Button("Connect") { store.submitManualToken(token) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(.black)
+                    .background(Capsule().fill(Color.white))
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(tokenCommand, forType: .string)
+                } label: {
+                    Label("Copy command", systemImage: "doc.on.doc")
+                }
                 .buttonStyle(.plain)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .padding(.horizontal, 12)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .foregroundStyle(.black)
-                .background(Capsule().fill(Color.white))
+                .foregroundStyle(.white.opacity(0.85))
+                .background(Capsule().fill(Color.white.opacity(0.12)))
+            }
         }
     }
 }
