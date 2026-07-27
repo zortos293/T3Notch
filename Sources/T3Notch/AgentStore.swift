@@ -47,12 +47,33 @@ final class AgentStore {
     var onboardingMessage: String?
     var answeredRequestIds: Set<String> = []
     var environment: EnvironmentDescriptor?
+    var machines: [EnvironmentSnapshot] = []
+    var t3ConnectDetection: T3ConnectSessionDetection = .unavailable
+    var t3ConnectEnvironments: [T3ConnectEnvironment] = []
+    var t3ConnectSessionUpdateAvailable = false
+    var remoteOperationMessage: String?
+    var isRemoteOperationRunning = false
+    var remoteVaultLocked = false
 
-    private var transport: (any T3Transport)?
     private(set) var endpoint = ServerEndpoint()
-    private var shellTask: Task<Void, Never>?
-    private var detailTask: Task<Void, Never>?
-    private var subscribedThreadId: String?
+    private let coordinator = MultiEnvironmentCoordinator()
+    private let profileStore = EnvironmentProfileStore()
+    private let remoteVault = RemoteCredentialVault()
+    private let t3ConnectImporter = ElectronSafeStorageImporter()
+    private var coordinatorTask: Task<Void, Never>?
+    private var snapshotsByEnvironment: [EnvironmentID: EnvironmentSnapshot] = [:]
+    /// Relay shells may stop returning a thread as soon as its turn finishes.
+    /// Keep that last transition locally so remote results still get one review.
+    private var retainedRemoteCompletions: [EnvironmentID: [String: ThreadShell]] = [:]
+    private var knownProjectsByEnvironment: [EnvironmentID: [String: ProjectShell]] = [:]
+    private var scopedThreads: [String: ScopedThreadID] = [:]
+    private var scopedProjects: [String: ScopedProjectID] = [:]
+    private var localEnvironmentID: EnvironmentID?
+    private var dpopSigner: DPoPSigner?
+    private var t3ConnectClient: T3ConnectClient?
+    private var directFailureCounts: [EnvironmentID: Int] = [:]
+    private var directProbeSuccesses: [EnvironmentID: Int] = [:]
+    private var connectFallbacksInFlight: Set<EnvironmentID> = []
     private var clockTimer: Timer?
     private var celebrationTask: Task<Void, Never>?
     private var celebrationToken = 0
@@ -67,13 +88,16 @@ final class AgentStore {
     /// Which forge setting `mergeWatcher` was built for, so it is only rebuilt
     /// when that actually changes — rebuilding resets what it has seen.
     private var watcherUsesForge: Bool
-    private var hasReviewBaseline = false
+    private var reviewBaselines: Set<EnvironmentID> = []
+    private var reviewRevision = 0
 
     init(settings: SettingsStore) {
         let usesForge = settings.values.askForgeForMerges
         self.settings = settings
         watcherUsesForge = usesForge
         mergeWatcher = MergeWatcher(forge: usesForge ? .gh : .disabled)
+        observeCoordinator()
+        refreshT3ConnectDetection()
     }
 
     var focusedThread: ThreadShell? {
@@ -81,8 +105,24 @@ final class AgentStore {
         return threads.first(where: { $0.id == focusedThreadId }) ?? activeThreads.first
     }
 
+    var focusedScopedThread: ScopedThreadID? {
+        focusedThreadId.flatMap { scopedThreads[$0] }
+    }
+
+    func environmentID(for thread: ThreadShell) -> EnvironmentID? {
+        scopedThreads[thread.id]?.environmentID
+    }
+
+    func machineLabel(for thread: ThreadShell) -> String {
+        guard let id = environmentID(for: thread) else { return "This Mac" }
+        return snapshotsByEnvironment[id]?.descriptor?.label
+            ?? snapshotsByEnvironment[id]?.profile.label
+            ?? id.rawValue
+    }
+
     var activeThreads: [ThreadShell] {
-        threads.compactMap { thread -> (ThreadShell, AgentAwarenessPhase)? in
+        _ = reviewRevision
+        return threads.compactMap { thread -> (ThreadShell, AgentAwarenessPhase)? in
             guard let phase = resolveThreadAwarenessPhase(thread) else { return nil }
             switch phase {
             case .running, .starting, .waitingForApproval, .waitingForInput, .failed:
@@ -104,6 +144,7 @@ final class AgentStore {
     /// Completed threads the user has not dealt with yet. `settledAt` is T3 Code's
     /// own "handled" marker, so settling there clears the notch too.
     func awaitsReview(_ thread: ThreadShell) -> Bool {
+        _ = reviewRevision
         guard settings.values.keepFinishedUntilReviewed else { return false }
         guard resolveThreadAwarenessPhase(thread) == .completed else { return false }
         guard thread.settledAt == nil else { return false }
@@ -128,6 +169,10 @@ final class AgentStore {
         // Acting on the thread means the banner has served its purpose.
         dismissCelebration()
         reviewStore.insert(completionKey(for: thread))
+        if let scoped = scopedThreads[thread.id] {
+            retainedRemoteCompletions[scoped.environmentID]?[scoped.threadID] = nil
+        }
+        reviewRevision &+= 1
         if focusedThreadId == thread.id {
             replaceFocusedThread(
                 with: activeThreads.first { $0.id != thread.id }?.id
@@ -289,14 +334,26 @@ final class AgentStore {
     /// is no deep link to a single thread. Bringing it forward beats opening a
     /// duplicate of the same thread in a browser tab.
     func openInT3Code(_ thread: ThreadShell) {
-        if settings.values.openInDesktopApp, T3CodeApp.activate() {
+        guard let scoped = scopedThreads[thread.id],
+              let snapshot = snapshotsByEnvironment[scoped.environmentID]
+        else {
             markReviewed(thread)
             return
         }
-        if let environmentId = environment?.environmentId,
+        if snapshot.activeAccessPath == .local,
+           settings.values.openInDesktopApp,
+           T3CodeApp.activate()
+        {
+            markReviewed(thread)
+            return
+        }
+        let baseURL = snapshot.activeAccessPath == .t3Connect
+            ? URL(string: "https://app.t3.codes/")!
+            : snapshot.profile.directEndpoint?.baseURL ?? endpoint.baseURL
+        if let environmentId = snapshot.descriptor?.environmentId,
            let url = URL(
-               string: "/threads/\(environmentId)/\(thread.id)",
-               relativeTo: endpoint.baseURL
+               string: "/threads/\(environmentId)/\(scoped.threadID)",
+               relativeTo: baseURL
            ) {
             NSWorkspace.shared.open(url)
         }
@@ -331,6 +388,49 @@ final class AgentStore {
             let project = projects.first { $0.id == projectId }
                 ?? ProjectShell(id: projectId, title: "Project")
             return (project, threads)
+        }
+    }
+
+    struct MachineThreadGroup: Identifiable {
+        let environmentID: EnvironmentID
+        let label: String
+        let source: EnvironmentSource
+        let projects: [(project: ProjectShell, threads: [ThreadShell])]
+        var id: EnvironmentID { environmentID }
+    }
+
+    var activeThreadsByMachine: [MachineThreadGroup] {
+        var machineOrder: [EnvironmentID] = []
+        var byMachine: [EnvironmentID: [ThreadShell]] = [:]
+        for thread in activeThreads {
+            guard let environmentID = environmentID(for: thread) else { continue }
+            if byMachine[environmentID] == nil { machineOrder.append(environmentID) }
+            byMachine[environmentID, default: []].append(thread)
+        }
+        return machineOrder.compactMap { environmentID in
+            guard let machineThreads = byMachine[environmentID] else { return nil }
+            var projectOrder: [String] = []
+            var byProject: [String: [ThreadShell]] = [:]
+            for thread in machineThreads {
+                if byProject[thread.projectId] == nil { projectOrder.append(thread.projectId) }
+                byProject[thread.projectId, default: []].append(thread)
+            }
+            let groups = projectOrder.compactMap { projectID
+                -> (project: ProjectShell, threads: [ThreadShell])? in
+                guard let threads = byProject[projectID] else { return nil }
+                let project = projects.first { $0.id == projectID }
+                    ?? ProjectShell(id: projectID, title: "Project")
+                return (project, threads)
+            }
+            let label = snapshotsByEnvironment[environmentID]?.descriptor?.label
+                ?? snapshotsByEnvironment[environmentID]?.profile.label
+                ?? environmentID.rawValue
+            return MachineThreadGroup(
+                environmentID: environmentID,
+                label: label,
+                source: snapshotsByEnvironment[environmentID]?.activeAccessPath ?? .local,
+                projects: groups
+            )
         }
     }
 
@@ -376,7 +476,11 @@ final class AgentStore {
 
     /// Machine the work is happening on, as reported by the server environment.
     var machineLabel: String? {
-        environment?.label?.nilIfBlank
+        guard let id = focusedScopedThread?.environmentID else {
+            return environment?.label?.nilIfBlank
+        }
+        return snapshotsByEnvironment[id]?.descriptor?.label?.nilIfBlank
+            ?? snapshotsByEnvironment[id]?.profile.label.nilIfBlank
     }
 
     var platformLabel: String? {
@@ -433,8 +537,8 @@ final class AgentStore {
     }
 
     func start() async {
-        let endpoint = await ServerDiscovery.resolveEndpoint()
-        self.endpoint = endpoint
+        let localEndpoint = await ServerDiscovery.resolveEndpoint()
+        self.endpoint = localEndpoint
         var token = KeychainStore.loadToken()
 
         if token == nil {
@@ -454,7 +558,7 @@ final class AgentStore {
         guard let token else { return }
 
         do {
-            _ = try await TokenMinting.verifyToken(token: token, endpoint: endpoint)
+            _ = try await TokenMinting.verifyToken(token: token, endpoint: localEndpoint)
         } catch {
             needsOnboarding = true
             onboardingMessage =
@@ -464,30 +568,153 @@ final class AgentStore {
         }
 
         needsOnboarding = false
-        let client = T3HTTPClient(endpoint: endpoint, token: token)
-        environment = try? await client.fetchEnvironment()
-        let polling = PollingTransport(client: client)
-        polling.onConnectionStateChange = { [weak self] state in
-            Task { @MainActor in
-                self?.connectionState = state
-                if state == .unauthorized {
-                    self?.needsOnboarding = true
-                    self?.onboardingMessage = "Session expired. Paste a new bearer token."
-                }
-            }
-        }
-        transport = polling
+        let client = T3HTTPClient(endpoint: localEndpoint, token: token)
+        let localDescriptor = try? await client.fetchEnvironment()
+        environment = localDescriptor
+        let localID = EnvironmentID(localDescriptor?.environmentId?.nilIfBlank ?? "local")
+        localEnvironmentID = localID
+        normalizeT3ConnectProfiles(localEnvironmentID: localID)
+        coordinator.register(
+            profile: EnvironmentProfile(
+                environmentID: localID,
+                label: localDescriptor?.label?.nilIfBlank ?? "This Mac",
+                directEndpoint: localEndpoint,
+                source: .local
+            ),
+            descriptor: localDescriptor,
+            endpoint: localEndpoint,
+            authorizer: BearerHTTPAuthorizer(token: token)
+        )
         connectionState = .connecting
-
-        shellTask?.cancel()
-        shellTask = Task { [weak self] in
-            guard let self else { return }
-            for await snapshot in polling.shell {
-                await self.applyShell(snapshot)
-            }
-        }
-
+        await restoreRemoteMachines()
         startMergeWatch()
+    }
+
+    private func restoreRemoteMachines() async {
+        let profiles = profileStore.load()
+        for profile in profiles where !profile.enabled {
+            installPlaceholder(profile: profile, state: .offline("Disabled"))
+        }
+        let document: RemoteCredentialDocument
+        do {
+            document = try remoteVault.loadWithoutPrompt()
+            remoteVaultLocked = false
+        } catch RemoteCredentialVaultError.locked {
+            remoteVaultLocked = true
+            for profile in profiles where profile.enabled {
+                installPlaceholder(profile: profile, state: .credentialLocked)
+            }
+            return
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+            return
+        }
+        do {
+            let signer = try DPoPSigner(privateKeyRawRepresentation: document.dpopPrivateKey)
+            dpopSigner = signer
+            if document.dpopPrivateKey == nil {
+                let raw = await signer.privateKeyRawRepresentation
+                try remoteVault.update { $0.dpopPrivateKey = raw }
+            }
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+            return
+        }
+        guard let signer = dpopSigner else { return }
+        for profile in profiles where profile.enabled {
+            if profile.source == .t3Connect {
+                let state: EnvironmentConnectionState
+                if T3ConnectConfiguration.load() == nil {
+                    state = .incompatible("T3 Connect is not configured in this build.")
+                } else if document.importedT3Connect == nil {
+                    state = .unauthorized
+                } else if let endpoint = profile.directEndpoint,
+                          let credential = document.connectEnvironmentCredentials[
+                            profile.environmentID.rawValue
+                          ],
+                          !credential.needsRefresh
+                {
+                    let authorizer = DPoPHTTPAuthorizer(
+                        accessToken: credential.accessToken,
+                        signer: signer
+                    )
+                    let client = T3HTTPClient(endpoint: endpoint, authorizer: authorizer)
+                    if let descriptor = try? await client.fetchEnvironment(),
+                       descriptor.environmentId == profile.environmentID.rawValue,
+                       (try? await client.verifySession()) != nil
+                    {
+                        coordinator.register(
+                            profile: profile,
+                            descriptor: descriptor,
+                            endpoint: endpoint,
+                            authorizer: authorizer
+                        )
+                        continue
+                    }
+                    state = .connecting
+                } else {
+                    state = .connecting
+                }
+                installPlaceholder(profile: profile, state: state)
+                continue
+            }
+            guard profile.source == .direct else { continue }
+            guard let endpoint = profile.directEndpoint,
+                  let credential = document.environmentCredentials[profile.environmentID.rawValue]
+            else {
+                installPlaceholder(profile: profile, state: .needsPairing)
+                continue
+            }
+            guard credential.expiresAt > .now else {
+                installPlaceholder(profile: profile, state: .needsPairing)
+                continue
+            }
+            let authorizer = DPoPHTTPAuthorizer(
+                accessToken: credential.accessToken,
+                signer: signer
+            )
+            let descriptor = try? await T3HTTPClient(
+                endpoint: endpoint,
+                authorizer: authorizer
+            ).fetchEnvironment()
+            guard descriptor?.environmentId == profile.environmentID.rawValue else {
+                installPlaceholder(profile: profile, state: .incompatible(
+                    "The endpoint reports a different environment."
+                ))
+                continue
+            }
+            coordinator.register(
+                profile: profile,
+                descriptor: descriptor,
+                endpoint: endpoint,
+                authorizer: authorizer
+            )
+        }
+        configureT3Connect()
+        for profile in profiles where profile.source == .direct && profile.enabled {
+            guard snapshotsByEnvironment[profile.environmentID]?.connectionState
+                == .needsPairing
+            else {
+                continue
+            }
+            Task { await attemptConnectFallback(profile.environmentID) }
+        }
+    }
+
+    private func installPlaceholder(
+        profile: EnvironmentProfile,
+        state: EnvironmentConnectionState
+    ) {
+        coordinator.suspend(profile.environmentID)
+        let snapshot = EnvironmentSnapshot(
+            profile: profile,
+            descriptor: nil,
+            connectionState: state,
+            activeAccessPath: profile.source,
+            shell: nil
+        )
+        snapshotsByEnvironment[profile.environmentID] = snapshot
+        rebuildFlattenedWorld()
     }
 
     /// Settings the views need. Reading them through the store keeps the panel's
@@ -540,6 +767,625 @@ final class AgentStore {
         }
     }
 
+    var remoteMachines: [EnvironmentSnapshot] {
+        machines.filter { $0.profile.source != .local }
+    }
+
+    var canImportT3Connect: Bool {
+        T3ConnectConfiguration.load() != nil
+            && {
+                if case .signedIn = t3ConnectDetection { return true }
+                return false
+            }()
+    }
+
+    var canRepairT3ConnectPermissions: Bool {
+        if case .unsafePermissions = t3ConnectDetection { return true }
+        return false
+    }
+
+    var t3ConnectImportHasProblem: Bool {
+        switch t3ConnectDetection {
+        case .unsafePermissions, .incompatible:
+            true
+        default:
+            false
+        }
+    }
+
+    var hasImportedT3Connect: Bool { t3ConnectClient != nil }
+
+    var showsT3Connect: Bool {
+        guard T3ConnectConfiguration.load() != nil else { return hasImportedT3Connect }
+        return switch t3ConnectDetection {
+        case .signedIn, .unsafePermissions, .incompatible:
+            true
+        case .unavailable, .signedOut:
+            hasImportedT3Connect
+        }
+    }
+
+    var t3ConnectImportDetail: String {
+        switch t3ConnectDetection {
+        case .unsafePermissions:
+            "T3 Code’s session file is writable by other local users. "
+                + "Run chmod 600 ~/.t3/userdata/clerk-tokens.json, then refresh."
+        case let .incompatible(reason):
+            reason
+        case .signedIn:
+            "Use the account already signed in to T3 Code. Importing asks for Keychain access once."
+        case .signedOut:
+            "Sign in to T3 Code before importing its T3 Connect session."
+        case .unavailable:
+            "No compatible T3 Code session was found."
+        }
+    }
+
+    func copyT3ConnectPermissionFix() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            "chmod 600 ~/.t3/userdata/clerk-tokens.json",
+            forType: .string
+        )
+    }
+
+    func refreshT3ConnectDetection() {
+        guard T3ConnectConfiguration.load() != nil else {
+            t3ConnectDetection = .unavailable
+            return
+        }
+        t3ConnectDetection = t3ConnectImporter.detect()
+        switch t3ConnectDetection {
+        case let .signedIn(ciphertextFingerprint):
+            if let document = try? remoteVault.document(),
+               let imported = document.importedT3Connect
+            {
+                t3ConnectSessionUpdateAvailable =
+                    imported.ciphertextFingerprint != ciphertextFingerprint
+            } else {
+                t3ConnectSessionUpdateAvailable = false
+            }
+        case .signedOut, .unavailable:
+            t3ConnectSessionUpdateAvailable = false
+            if let document = try? remoteVault.document(),
+               document.importedT3Connect != nil
+            {
+                purgeImportedT3ConnectAfterLogout()
+            }
+        case .unsafePermissions, .incompatible:
+            t3ConnectSessionUpdateAvailable = false
+        }
+    }
+
+    func pairRemoteMachine(
+        pairingURL: String?,
+        host: String?,
+        code: String?,
+        allowsInsecureHTTP: Bool
+    ) async throws {
+        isRemoteOperationRunning = true
+        remoteOperationMessage = nil
+        defer { isRemoteOperationRunning = false }
+        let target: RemotePairingTarget
+        if let pairingURL = pairingURL?.nilIfBlank {
+            target = try RemotePairingTarget(pairingURL: pairingURL)
+        } else {
+            target = try RemotePairingTarget(
+                host: host ?? "",
+                pairingCode: code ?? ""
+            )
+        }
+        let signer = try await ensureDPoPSigner(allowsPrompt: false)
+        let result = try await RemotePairingClient(signer: signer).pair(
+            target: target,
+            allowsInsecureHTTP: allowsInsecureHTTP
+        )
+        try profileStore.upsert(result.profile)
+        try remoteVault.update {
+            $0.environmentCredentials[result.profile.environmentID.rawValue] = result.credential
+        }
+        snapshotsByEnvironment.removeValue(forKey: result.profile.environmentID)
+        coordinator.register(
+            profile: result.profile,
+            descriptor: result.descriptor,
+            endpoint: target.endpoint,
+            authorizer: DPoPHTTPAuthorizer(
+                accessToken: result.credential.accessToken,
+                signer: signer
+            )
+        )
+    }
+
+    func setMachineEnabled(_ environmentID: EnvironmentID, enabled: Bool) {
+        guard var profile = profileStore.load()
+            .first(where: { $0.environmentID == environmentID })
+        else {
+            return
+        }
+        profile.enabled = enabled
+        do {
+            try profileStore.upsert(profile)
+            if enabled {
+                Task { await restoreRemoteMachines() }
+            } else {
+                retainedRemoteCompletions.removeValue(forKey: environmentID)
+                knownProjectsByEnvironment.removeValue(forKey: environmentID)
+                installPlaceholder(profile: profile, state: .offline("Disabled"))
+            }
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    func reconnectMachine(_ environmentID: EnvironmentID) {
+        coordinator.reconnect(environmentID)
+    }
+
+    func removeMachine(_ environmentID: EnvironmentID) {
+        do {
+            let removedProfile = profileStore.load().first {
+                $0.environmentID == environmentID
+            }
+            if var removedProfile, removedProfile.source == .t3Connect {
+                removedProfile.enabled = false
+                try profileStore.upsert(removedProfile)
+                try remoteVault.removeEnvironment(environmentID)
+                retainedRemoteCompletions.removeValue(forKey: environmentID)
+                knownProjectsByEnvironment.removeValue(forKey: environmentID)
+                installPlaceholder(
+                    profile: removedProfile,
+                    state: .offline("Disabled")
+                )
+                return
+            }
+            try profileStore.remove(environmentID)
+            try remoteVault.removeEnvironment(environmentID)
+            coordinator.remove(environmentID)
+            snapshotsByEnvironment.removeValue(forKey: environmentID)
+            rebuildFlattenedWorld()
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    func unlockRemoteCredentials() async {
+        do {
+            _ = try remoteVault.unlock()
+            remoteVaultLocked = false
+            await restoreRemoteMachines()
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    func importT3Connect() async {
+        isRemoteOperationRunning = true
+        remoteOperationMessage = nil
+        defer { isRemoteOperationRunning = false }
+        do {
+            let imported = try t3ConnectImporter.importSession()
+            let signer = try await ensureDPoPSigner(allowsPrompt: true)
+            guard let configuration = T3ConnectConfiguration.load() else {
+                throw T3ConnectError.invalidConfiguration
+            }
+            let client = T3ConnectClient(
+                configuration: configuration,
+                vault: remoteVault,
+                signer: signer
+            )
+            try await client.importSession(imported)
+            t3ConnectClient = client
+            try await refreshT3ConnectEnvironments(connectEnabled: true)
+            t3ConnectSessionUpdateAvailable = false
+        } catch T3ConnectError.unauthorized {
+            purgeImportedT3ConnectAfterLogout()
+            remoteOperationMessage = T3ConnectError.unauthorized.localizedDescription
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    func refreshT3ConnectEnvironments(connectEnabled: Bool = false) async throws {
+        guard let client = t3ConnectClient else {
+            throw T3ConnectError.notImported
+        }
+        let inventory = try await client.listEnvironments()
+        let legacyExclusionKey =
+            "gg.t3tools.t3notch.excludedT3ConnectEnvironments.v1"
+        let legacyExcludedIDs = Set(
+            UserDefaults.standard.stringArray(forKey: legacyExclusionKey) ?? []
+        )
+        for environment in inventory
+        where legacyExcludedIDs.contains(environment.environmentID.rawValue) {
+            if !profileStore.load().contains(where: {
+                $0.environmentID == environment.environmentID
+            }) {
+                try profileStore.upsert(
+                    EnvironmentProfile(
+                        environmentID: environment.environmentID,
+                        label: environment.label,
+                        directEndpoint: environment.endpoint,
+                        source: .t3Connect,
+                        enabled: false
+                    )
+                )
+            }
+        }
+        UserDefaults.standard.removeObject(forKey: legacyExclusionKey)
+        let environments = inventory.filter { environment in
+            environment.environmentID != localEnvironmentID
+        }
+
+        // Inventory discovery is read-only. A newly imported T3 Connect session
+        // must never begin monitoring every linked machine automatically; save
+        // each new remote environment as disabled until its toggle is enabled.
+        var profiles = profileStore.load()
+        for environment in environments where !profiles.contains(where: {
+            $0.environmentID == environment.environmentID
+        }) {
+            let profile = EnvironmentProfile(
+                environmentID: environment.environmentID,
+                label: environment.label,
+                directEndpoint: environment.endpoint,
+                source: .t3Connect,
+                enabled: false
+            )
+            try profileStore.upsert(profile)
+            profiles.append(profile)
+        }
+
+        t3ConnectEnvironments = environments
+        if connectEnabled {
+            for environment in environments {
+                let existing = profiles.first {
+                    $0.environmentID == environment.environmentID
+                }
+                if existing?.source == .direct || existing?.enabled == false {
+                    continue
+                }
+                if let snapshot = snapshotsByEnvironment[environment.environmentID],
+                   snapshot.activeAccessPath == .t3Connect,
+                   snapshot.connectionState == .connected
+                {
+                    continue
+                }
+                try await connectT3ConnectEnvironment(environment)
+            }
+        }
+    }
+
+    func refreshT3Connect() async {
+        isRemoteOperationRunning = true
+        remoteOperationMessage = nil
+        defer { isRemoteOperationRunning = false }
+        do {
+            try await refreshT3ConnectEnvironments(connectEnabled: true)
+        } catch T3ConnectError.unauthorized {
+            purgeImportedT3ConnectAfterLogout()
+            remoteOperationMessage = T3ConnectError.unauthorized.localizedDescription
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    func connectT3ConnectEnvironment(
+        _ environment: T3ConnectEnvironment,
+        replacingDirectPath: Bool = false
+    ) async throws {
+        guard let client = t3ConnectClient else { throw T3ConnectError.notImported }
+        if !replacingDirectPath, profileStore.load().contains(where: {
+            $0.environmentID == environment.environmentID && $0.source == .direct
+        }) {
+            return
+        }
+        let result = try await client.connect(environment)
+        if !replacingDirectPath {
+            try profileStore.upsert(result.profile)
+        }
+        guard let endpoint = result.profile.directEndpoint else {
+            throw T3ConnectError.invalidResponse
+        }
+        coordinator.register(
+            profile: result.profile,
+            descriptor: result.descriptor,
+            endpoint: endpoint,
+            authorizer: DPoPHTTPAuthorizer(
+                accessToken: result.credential.accessToken,
+                signer: try await ensureDPoPSigner(allowsPrompt: false)
+            )
+        )
+    }
+
+    func forgetT3Connect() async {
+        do {
+            try await t3ConnectClient?.forget()
+            t3ConnectClient = nil
+            t3ConnectEnvironments = []
+            for profile in profileStore.load() where profile.source == .t3Connect {
+                try profileStore.remove(profile.environmentID)
+                coordinator.remove(profile.environmentID)
+                snapshotsByEnvironment.removeValue(forKey: profile.environmentID)
+            }
+            rebuildFlattenedWorld()
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    private func configureT3Connect() {
+        refreshT3ConnectDetection()
+        guard let configuration = T3ConnectConfiguration.load(),
+              let signer = dpopSigner,
+              let document = try? remoteVault.document(),
+              document.importedT3Connect != nil
+        else {
+            return
+        }
+        t3ConnectClient = T3ConnectClient(
+            configuration: configuration,
+            vault: remoteVault,
+            signer: signer
+        )
+        Task { [weak self] in
+            try? await self?.refreshT3ConnectEnvironments(connectEnabled: true)
+        }
+    }
+
+    private func purgeImportedT3ConnectAfterLogout() {
+        try? remoteVault.forgetT3Connect()
+        t3ConnectClient = nil
+        t3ConnectEnvironments = []
+        t3ConnectSessionUpdateAvailable = false
+        let profiles = profileStore.load()
+        for profile in profiles where profile.source == .t3Connect {
+            try? profileStore.remove(profile.environmentID)
+            coordinator.remove(profile.environmentID)
+            snapshotsByEnvironment.removeValue(forKey: profile.environmentID)
+        }
+        let connectSnapshots = snapshotsByEnvironment.values.filter {
+            $0.activeAccessPath == .t3Connect
+        }
+        for snapshot in connectSnapshots {
+            guard let direct = profiles.first(where: {
+                $0.environmentID == snapshot.profile.environmentID && $0.source == .direct
+            }) else {
+                continue
+            }
+            installPlaceholder(profile: direct, state: .offline("T3 Connect signed out"))
+        }
+        rebuildFlattenedWorld()
+        Task { await restoreRemoteMachines() }
+    }
+
+    private func updateAccessPathHealth(_ snapshot: EnvironmentSnapshot) async {
+        let environmentID = snapshot.profile.environmentID
+        guard snapshot.profile.source == .direct else {
+            if snapshot.profile.source == .t3Connect {
+                directFailureCounts[environmentID] = 0
+            }
+            return
+        }
+        switch snapshot.connectionState {
+        case .connected, .connecting:
+            directFailureCounts[environmentID] = 0
+        case .offline:
+            directFailureCounts[environmentID, default: 0] += 1
+            if directFailureCounts[environmentID, default: 0] >= 2 {
+                await attemptConnectFallback(environmentID)
+            }
+        case .needsPairing, .unauthorized:
+            await attemptConnectFallback(environmentID)
+        case .credentialLocked, .incompatible:
+            break
+        }
+    }
+
+    private func attemptConnectFallback(_ environmentID: EnvironmentID) async {
+        guard t3ConnectClient != nil,
+              !connectFallbacksInFlight.contains(environmentID)
+        else {
+            return
+        }
+        connectFallbacksInFlight.insert(environmentID)
+        defer { connectFallbacksInFlight.remove(environmentID) }
+        do {
+            if !t3ConnectEnvironments.contains(where: { $0.environmentID == environmentID }) {
+                try await refreshT3ConnectEnvironments(connectEnabled: false)
+            }
+            guard let environment = t3ConnectEnvironments.first(where: {
+                $0.environmentID == environmentID
+            }) else {
+                return
+            }
+            try await connectT3ConnectEnvironment(
+                environment,
+                replacingDirectPath: true
+            )
+            directFailureCounts[environmentID] = 0
+            directProbeSuccesses[environmentID] = 0
+        } catch T3ConnectError.unauthorized {
+            purgeImportedT3ConnectAfterLogout()
+        } catch {
+            // The direct session remains visible as offline. A future poll or
+            // maintenance refresh retries without disturbing local monitoring.
+        }
+    }
+
+    private func repairT3ConnectEnvironment(_ environmentID: EnvironmentID) async {
+        guard t3ConnectClient != nil,
+              !connectFallbacksInFlight.contains(environmentID)
+        else {
+            return
+        }
+        connectFallbacksInFlight.insert(environmentID)
+        defer { connectFallbacksInFlight.remove(environmentID) }
+        do {
+            if !t3ConnectEnvironments.contains(where: { $0.environmentID == environmentID }) {
+                try await refreshT3ConnectEnvironments(connectEnabled: false)
+            }
+            guard let environment = t3ConnectEnvironments.first(where: {
+                $0.environmentID == environmentID
+            }) else {
+                return
+            }
+            let hasDirect = profileStore.load().contains {
+                $0.environmentID == environmentID && $0.source == .direct
+            }
+            try await connectT3ConnectEnvironment(
+                environment,
+                replacingDirectPath: hasDirect
+            )
+        } catch T3ConnectError.unauthorized {
+            purgeImportedT3ConnectAfterLogout()
+        } catch {
+            // The machine stays offline until the next maintenance refresh.
+        }
+    }
+
+    private func probePreferredDirectPaths() async {
+        guard let signer = dpopSigner,
+              let document = try? remoteVault.document()
+        else {
+            return
+        }
+        let profiles = profileStore.load()
+        for snapshot in snapshotsByEnvironment.values
+            where snapshot.activeAccessPath == .t3Connect
+        {
+            let environmentID = snapshot.profile.environmentID
+            guard let direct = profiles.first(where: {
+                $0.environmentID == environmentID
+                    && $0.source == .direct
+                    && $0.enabled
+            }),
+                let endpoint = direct.directEndpoint,
+                let credential = document.environmentCredentials[environmentID.rawValue],
+                !credential.needsRefresh
+            else {
+                directProbeSuccesses[environmentID] = 0
+                continue
+            }
+            let client = T3HTTPClient(
+                endpoint: endpoint,
+                authorizer: DPoPHTTPAuthorizer(
+                    accessToken: credential.accessToken,
+                    signer: signer
+                )
+            )
+            do {
+                try await client.verifySession()
+                let descriptor = try await client.fetchEnvironment()
+                guard descriptor.environmentId == environmentID.rawValue else {
+                    directProbeSuccesses[environmentID] = 0
+                    continue
+                }
+                directProbeSuccesses[environmentID, default: 0] += 1
+                if directProbeSuccesses[environmentID, default: 0] >= 2 {
+                    coordinator.register(
+                        profile: direct,
+                        descriptor: descriptor,
+                        endpoint: endpoint,
+                        authorizer: DPoPHTTPAuthorizer(
+                            accessToken: credential.accessToken,
+                            signer: signer
+                        )
+                    )
+                    directProbeSuccesses[environmentID] = 0
+                }
+            } catch {
+                directProbeSuccesses[environmentID] = 0
+            }
+        }
+    }
+
+    /// Called on wake, network restoration, and the menu-bar reconnect command.
+    /// Local polling is independent, so a Connect outage cannot suppress this.
+    func handleConnectivityRestored() {
+        coordinator.reconnect()
+        Task { await performRemoteMaintenance() }
+    }
+
+    /// Refreshes Connect inventory and probes any direct path currently using a
+    /// relay fallback. AppDelegate runs this every 60 seconds.
+    func performRemoteMaintenance() async {
+        refreshT3ConnectDetection()
+        if t3ConnectClient != nil {
+            do {
+                try await refreshT3ConnectEnvironments(connectEnabled: true)
+            } catch T3ConnectError.unauthorized {
+                purgeImportedT3ConnectAfterLogout()
+            } catch {
+                // Periodic maintenance is deliberately quiet. The explicit
+                // Refresh action surfaces its error in Settings.
+            }
+        }
+        await probePreferredDirectPaths()
+    }
+
+    func isT3ConnectEnvironmentEnabled(_ environmentID: EnvironmentID) -> Bool {
+        profileStore.load().first { $0.environmentID == environmentID }?.enabled ?? false
+    }
+
+    func setT3ConnectEnvironmentEnabled(
+        _ environment: T3ConnectEnvironment,
+        enabled: Bool
+    ) {
+        if let existing = profileStore.load().first(where: {
+            $0.environmentID == environment.environmentID
+        }) {
+            setMachineEnabled(existing.environmentID, enabled: enabled)
+            return
+        }
+        let profile = EnvironmentProfile(
+            environmentID: environment.environmentID,
+            label: environment.label,
+            directEndpoint: environment.endpoint,
+            source: .t3Connect,
+            enabled: enabled
+        )
+        do {
+            try profileStore.upsert(profile)
+            if enabled {
+                Task {
+                    do {
+                        try await connectT3ConnectEnvironment(environment)
+                    } catch {
+                        remoteOperationMessage = error.localizedDescription
+                        installPlaceholder(profile: profile, state: .offline(nil))
+                    }
+                }
+            } else {
+                installPlaceholder(profile: profile, state: .offline("Disabled"))
+            }
+        } catch {
+            remoteOperationMessage = error.localizedDescription
+        }
+    }
+
+    /// Local loopback always wins over a relay copy of this Mac. Remote relay
+    /// profiles keep their own persisted enable state.
+    private func normalizeT3ConnectProfiles(localEnvironmentID: EnvironmentID) {
+        for profile in profileStore.load() where profile.source == .t3Connect {
+            guard profile.environmentID == localEnvironmentID else { continue }
+            try? profileStore.remove(profile.environmentID)
+            try? remoteVault.removeEnvironment(profile.environmentID)
+            coordinator.remove(profile.environmentID)
+            snapshotsByEnvironment.removeValue(forKey: profile.environmentID)
+        }
+    }
+
+    private func ensureDPoPSigner(allowsPrompt: Bool) async throws -> DPoPSigner {
+        if let dpopSigner { return dpopSigner }
+        let document = allowsPrompt ? try remoteVault.unlock() : try remoteVault.loadWithoutPrompt()
+        let signer = try DPoPSigner(privateKeyRawRepresentation: document.dpopPrivateKey)
+        dpopSigner = signer
+        if document.dpopPrivateKey == nil {
+            let raw = await signer.privateKeyRawRepresentation
+            try remoteVault.update { $0.dpopPrivateKey = raw }
+        }
+        return signer
+    }
+
     func setHovering(_ hovering: Bool) {
         isHovering = hovering
         recomputePresentation(userInitiated: true)
@@ -561,10 +1407,7 @@ final class AgentStore {
 
     func expand() {
         presentation = .expanded
-        transport?.setExpanded(true)
-        if let id = focusedThread?.id {
-            subscribeDetail(id)
-        }
+        coordinator.setExpanded(true)
         syncClock()
     }
 
@@ -575,73 +1418,261 @@ final class AgentStore {
     }
 
     func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) {
-        guard let threadId = focusedThread?.id else { return }
+        guard let scoped = focusedScopedThread else { return }
         if isDemoRunning {
             pendingApprovals.removeAll { $0.requestId == approval.requestId }
             finishDemoPrompt()
             return
         }
-        answeredRequestIds.insert(approval.requestId)
+        answeredRequestIds.insert(scopedRequestKey(approval.requestId, thread: scoped))
         pendingApprovals.removeAll { $0.requestId == approval.requestId }
         let command = DispatchCommand.approvalRespond(
             commandId: UUID().uuidString,
-            threadId: threadId,
+            threadId: scoped.threadID,
             requestId: approval.requestId,
             decision: decision,
             createdAt: ISO8601Parsing.nowString()
         )
         Task {
-            try? await transport?.dispatch(command)
+            try? await coordinator.dispatch(command, to: scoped.environmentID)
         }
     }
 
     func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) {
-        guard let threadId = focusedThread?.id else { return }
+        guard let scoped = focusedScopedThread else { return }
         if isDemoRunning {
             pendingUserInputs.removeAll { $0.requestId == input.requestId }
             finishDemoPrompt()
             return
         }
-        answeredRequestIds.insert(input.requestId)
+        answeredRequestIds.insert(scopedRequestKey(input.requestId, thread: scoped))
         pendingUserInputs.removeAll { $0.requestId == input.requestId }
         let command = DispatchCommand.userInputRespond(
             commandId: UUID().uuidString,
-            threadId: threadId,
+            threadId: scoped.threadID,
             requestId: input.requestId,
             answers: answers,
             createdAt: ISO8601Parsing.nowString()
         )
         Task {
-            try? await transport?.dispatch(command)
+            try? await coordinator.dispatch(command, to: scoped.environmentID)
         }
     }
 
     func interruptTurn() {
-        guard let thread = focusedThread else { return }
+        guard let thread = focusedThread, let scoped = focusedScopedThread else { return }
         let command = DispatchCommand.turnInterrupt(
             commandId: UUID().uuidString,
-            threadId: thread.id,
+            threadId: scoped.threadID,
             turnId: thread.latestTurn?.turnId,
             createdAt: ISO8601Parsing.nowString()
         )
         Task {
-            try? await transport?.dispatch(command)
+            try? await coordinator.dispatch(command, to: scoped.environmentID)
         }
     }
 
     // MARK: - Private
 
-    private func applyShell(_ snapshot: ShellSnapshot) async {
+    private func observeCoordinator() {
+        coordinatorTask?.cancel()
+        coordinatorTask = Task { [weak self] in
+            guard let self else { return }
+            for await event in coordinator.events {
+                await self.applyEnvironmentEvent(event)
+            }
+        }
+    }
+
+    private func applyEnvironmentEvent(_ event: EnvironmentEvent) async {
+        switch event {
+        case let .snapshot(snapshot):
+            retainRemoteCompletionTransition(
+                from: snapshotsByEnvironment[snapshot.profile.environmentID],
+                to: snapshot
+            )
+            snapshotsByEnvironment[snapshot.profile.environmentID] = snapshot
+            if snapshot.profile.source == .local {
+                connectionState = legacyConnectionState(snapshot.connectionState)
+                if snapshot.connectionState == .unauthorized {
+                    needsOnboarding = true
+                    onboardingMessage = "Session expired. Paste a new bearer token."
+                }
+            }
+            await updateAccessPathHealth(snapshot)
+            if snapshot.profile.source == .t3Connect,
+               snapshot.connectionState == .unauthorized
+            {
+                await repairT3ConnectEnvironment(snapshot.profile.environmentID)
+            }
+            rebuildFlattenedWorld()
+            await applyCombinedShell(changedEnvironment: snapshot.profile.environmentID)
+        case let .detail(scoped, detail):
+            await applyScopedDetail(detail, scoped: scoped)
+        case let .removed(environmentID):
+            snapshotsByEnvironment.removeValue(forKey: environmentID)
+            retainedRemoteCompletions.removeValue(forKey: environmentID)
+            knownProjectsByEnvironment.removeValue(forKey: environmentID)
+            rebuildFlattenedWorld()
+            await applyCombinedShell(changedEnvironment: environmentID)
+        }
+    }
+
+    /// T3 Connect's active shell can jump directly from "running" to absent.
+    /// Turn that disappearance into a stable, machine-scoped completion card.
+    /// This only runs after the first real snapshot, so historical remote work
+    /// never floods the notch when a machine first connects.
+    private func retainRemoteCompletionTransition(
+        from previous: EnvironmentSnapshot?,
+        to incoming: EnvironmentSnapshot
+    ) {
+        let environmentID = incoming.profile.environmentID
+        guard incoming.activeAccessPath != .local,
+              reviewBaselines.contains(environmentID),
+              let previousShell = previous?.shell,
+              let incomingShell = incoming.shell
+        else {
+            return
+        }
+
+        var knownProjects = knownProjectsByEnvironment[environmentID] ?? [:]
+        for project in previousShell.projects + incomingShell.projects {
+            knownProjects[project.id] = project
+        }
+        knownProjectsByEnvironment[environmentID] = knownProjects
+
+        var retained = retainedRemoteCompletions[environmentID] ?? [:]
+        let previousByID = Dictionary(
+            uniqueKeysWithValues: previousShell.threads.map { ($0.id, $0) }
+        )
+        let incomingByID = Dictionary(
+            uniqueKeysWithValues: incomingShell.threads.map { ($0.id, $0) }
+        )
+
+        // A new run in the same thread supersedes an older retained result.
+        for thread in incomingShell.threads {
+            switch resolveThreadAwarenessPhase(thread) {
+            case .completed:
+                if shouldRetainRemoteCompletion(thread, environmentID: environmentID) {
+                    retained[thread.id] = thread
+                } else {
+                    retained[thread.id] = nil
+                }
+            case .running, .starting, .waitingForApproval, .waitingForInput:
+                retained[thread.id] = nil
+            default:
+                if let prior = previousByID[thread.id],
+                   isActiveWork(resolveThreadAwarenessPhase(prior))
+                {
+                    let completion = completedCopy(
+                        of: thread,
+                        at: incomingShell.updatedAt,
+                        sequence: incomingShell.snapshotSequence
+                    )
+                    if shouldRetainRemoteCompletion(
+                        completion,
+                        environmentID: environmentID
+                    ) {
+                        retained[thread.id] = completion
+                    }
+                }
+            }
+        }
+
+        for thread in previousShell.threads where incomingByID[thread.id] == nil {
+            let completion: ThreadShell?
+            switch resolveThreadAwarenessPhase(thread) {
+            case .completed:
+                completion = thread
+            case .running, .starting, .waitingForApproval, .waitingForInput:
+                completion = completedCopy(
+                    of: thread,
+                    at: incomingShell.updatedAt,
+                    sequence: incomingShell.snapshotSequence
+                )
+            default:
+                completion = nil
+            }
+            if let completion,
+               shouldRetainRemoteCompletion(completion, environmentID: environmentID)
+            {
+                retained[thread.id] = completion
+            }
+        }
+
+        retainedRemoteCompletions[environmentID] = retained
+    }
+
+    private func isActiveWork(_ phase: AgentAwarenessPhase?) -> Bool {
+        switch phase {
+        case .running, .starting, .waitingForApproval, .waitingForInput:
+            true
+        default:
+            false
+        }
+    }
+
+    private func completedCopy(
+        of thread: ThreadShell,
+        at completedAt: String,
+        sequence: Int
+    ) -> ThreadShell {
+        var completion = thread
+        if var turn = completion.latestTurn {
+            turn.state = "completed"
+            turn.completedAt = turn.completedAt ?? completedAt
+            completion.latestTurn = turn
+        } else {
+            completion.latestTurn = LatestTurn(
+                turnId: completion.session?.activeTurnId
+                    ?? "remote-completion-\(sequence)-\(thread.id)",
+                state: "completed",
+                completedAt: completedAt
+            )
+        }
+        if var session = completion.session {
+            session.status = "idle"
+            session.activeTurnId = nil
+            session.updatedAt = completedAt
+            completion.session = session
+        }
+        completion.updatedAt = completedAt
+        completion.settledAt = nil
+        completion.hasPendingApprovals = false
+        completion.hasPendingUserInput = false
+        return completion
+    }
+
+    private func shouldRetainRemoteCompletion(
+        _ rawThread: ThreadShell,
+        environmentID: EnvironmentID
+    ) -> Bool {
+        guard rawThread.archivedAt == nil else { return false }
+        var scopedThread = rawThread
+        scopedThread.id = ScopedThreadID(
+            environmentID: environmentID,
+            threadID: rawThread.id
+        ).storageKey
+        return !reviewStore.contains(completionKey(for: scopedThread))
+    }
+
+    private func applyCombinedShell(changedEnvironment: EnvironmentID) async {
         // The welcome tour owns the panel while it runs.
         guard !isDemoRunning else { return }
-        projects = snapshot.projects
-        threads = snapshot.threads.filter { $0.archivedAt == nil }
 
         // Everything already finished when the notch started counts as seen,
         // otherwise the first snapshot would pin every historical thread.
-        if !hasReviewBaseline {
-            hasReviewBaseline = true
-            for thread in threads where resolveThreadAwarenessPhase(thread) == .completed {
+        // A connecting snapshot has no shell yet. Waiting for the first real
+        // shell prevents a remote machine's historical completions from being
+        // mistaken for brand-new Done notifications on the following event.
+        if !reviewBaselines.contains(changedEnvironment),
+           snapshotsByEnvironment[changedEnvironment]?.shell != nil
+        {
+            reviewBaselines.insert(changedEnvironment)
+            for thread in threads
+                where environmentID(for: thread) == changedEnvironment
+                    && resolveThreadAwarenessPhase(thread) == .completed
+            {
                 reviewStore.insert(completionKey(for: thread))
             }
         }
@@ -679,19 +1710,14 @@ final class AgentStore {
     private func replaceFocusedThread(with threadId: String?) {
         guard let threadId else {
             focusedThreadId = nil
-            transport?.setFocusedThread(nil)
-            detailTask?.cancel()
-            detailTask = nil
-            subscribedThreadId = nil
+            coordinator.setFocusedThread(nil)
             clearFocusedDetail()
+            syncFocusedEnvironment()
             return
         }
 
         guard threadId != focusedThreadId else {
-            transport?.setFocusedThread(threadId)
-            // Snapshots land every 800ms while an agent works; subscribing is
-            // idempotent so the detail stream survives them.
-            subscribeDetail(threadId)
+            coordinator.setFocusedThread(scopedThreads[threadId])
             return
         }
 
@@ -699,9 +1725,8 @@ final class AgentStore {
         // Detail arrives a poll later; drop the old thread's data so the card
         // never shows another agent's questions, plan, activity, or context.
         clearFocusedDetail()
-
-        transport?.setFocusedThread(threadId)
-        subscribeDetail(threadId)
+        syncFocusedEnvironment()
+        coordinator.setFocusedThread(scopedThreads[threadId])
     }
 
     private func clearFocusedDetail() {
@@ -714,29 +1739,139 @@ final class AgentStore {
         recentActivity = []
     }
 
-    /// Follows one thread's detail stream. Asking for the thread already being
-    /// followed is a no-op: `threadDetail(_:)` hands out a fresh stream and ends
-    /// the previous one, so re-subscribing on a timer would keep killing the
-    /// stream before any detail arrived.
-    private func subscribeDetail(_ threadId: String) {
-        guard let transport else { return }
-        guard threadId != subscribedThreadId else { return }
-        detailTask?.cancel()
-        subscribedThreadId = threadId
-        detailTask = Task { [weak self] in
-            guard let self else { return }
-            for await detail in transport.threadDetail(threadId) {
-                await self.applyDetail(detail)
+    private func rebuildFlattenedWorld() {
+        var nextProjects: [ProjectShell] = []
+        var nextThreads: [ThreadShell] = []
+        var nextScopedThreads: [String: ScopedThreadID] = [:]
+        var nextScopedProjects: [String: ScopedProjectID] = [:]
+
+        let ordered = snapshotsByEnvironment.values.sorted {
+            let left = sourcePriority($0.activeAccessPath)
+            let right = sourcePriority($1.activeAccessPath)
+            if left != right { return left < right }
+            return $0.profile.label.localizedStandardCompare($1.profile.label) == .orderedAscending
+        }
+        for snapshot in ordered {
+            guard snapshot.profile.enabled,
+                  snapshot.connectionState == .connected,
+                  let shell = snapshot.shell
+            else {
+                continue
             }
-            // The stream ended (transport stopped or replaced); let the next
-            // snapshot re-subscribe instead of going quiet for good.
-            self.detailStreamEnded(threadId)
+            let environmentID = snapshot.profile.environmentID
+            let retained = retainedRemoteCompletions[environmentID] ?? [:]
+            let shellThreadIDs = Set(shell.threads.map(\.id))
+            let retainedThreads = retained.values.filter {
+                !shellThreadIDs.contains($0.id)
+                    && shouldRetainRemoteCompletion($0, environmentID: environmentID)
+            }
+            let retainedProjectIDs = Set(retainedThreads.map(\.projectId))
+            var rawProjects = shell.projects
+            let shellProjectIDs = Set(rawProjects.map(\.id))
+            for projectID in retainedProjectIDs where !shellProjectIDs.contains(projectID) {
+                if let project = knownProjectsByEnvironment[environmentID]?[projectID] {
+                    rawProjects.append(project)
+                }
+            }
+            for rawProject in rawProjects {
+                let scoped = ScopedProjectID(
+                    environmentID: environmentID,
+                    projectID: rawProject.id
+                )
+                var project = rawProject
+                project.id = scoped.storageKey
+                nextScopedProjects[project.id] = scoped
+                nextProjects.append(project)
+            }
+            for shellThread in shell.threads where shellThread.archivedAt == nil {
+                let rawThread: ThreadShell
+                if resolveThreadAwarenessPhase(shellThread) == nil,
+                   let retainedCompletion = retained[shellThread.id]
+                {
+                    rawThread = retainedCompletion
+                } else {
+                    rawThread = shellThread
+                }
+                let scoped = ScopedThreadID(
+                    environmentID: environmentID,
+                    threadID: rawThread.id
+                )
+                let project = ScopedProjectID(
+                    environmentID: environmentID,
+                    projectID: rawThread.projectId
+                )
+                var thread = rawThread
+                thread.id = scoped.storageKey
+                thread.projectId = project.storageKey
+                nextScopedThreads[thread.id] = scoped
+                nextThreads.append(thread)
+            }
+            for rawThread in retainedThreads {
+                let scoped = ScopedThreadID(
+                    environmentID: environmentID,
+                    threadID: rawThread.id
+                )
+                let project = ScopedProjectID(
+                    environmentID: environmentID,
+                    projectID: rawThread.projectId
+                )
+                var thread = rawThread
+                thread.id = scoped.storageKey
+                thread.projectId = project.storageKey
+                nextScopedThreads[thread.id] = scoped
+                nextThreads.append(thread)
+            }
+        }
+        projects = nextProjects
+        threads = nextThreads
+        scopedThreads = nextScopedThreads
+        scopedProjects = nextScopedProjects
+        machines = ordered
+        syncFocusedEnvironment()
+    }
+
+    private func syncFocusedEnvironment() {
+        if let environmentID = focusedThreadId.flatMap({ scopedThreads[$0]?.environmentID }) {
+            environment = snapshotsByEnvironment[environmentID]?.descriptor
+        } else if let localEnvironmentID {
+            environment = snapshotsByEnvironment[localEnvironmentID]?.descriptor
         }
     }
 
-    private func detailStreamEnded(_ threadId: String) {
-        guard subscribedThreadId == threadId else { return }
-        subscribedThreadId = nil
+    private func legacyConnectionState(
+        _ state: EnvironmentConnectionState
+    ) -> ConnectionState {
+        switch state {
+        case .connecting: .connecting
+        case .connected: .connected
+        case .offline, .credentialLocked, .incompatible: .disconnected
+        case .unauthorized, .needsPairing: .unauthorized
+        }
+    }
+
+    private func sourcePriority(_ source: EnvironmentSource) -> Int {
+        switch source {
+        case .local: 0
+        case .direct: 1
+        case .t3Connect: 2
+        }
+    }
+
+    private func scopedRequestKey(_ requestID: String, thread: ScopedThreadID) -> String {
+        "\(thread.storageKey):\(requestID)"
+    }
+
+    private func applyScopedDetail(
+        _ snapshot: ThreadDetailSnapshot,
+        scoped: ScopedThreadID
+    ) async {
+        var displaySnapshot = snapshot
+        displaySnapshot.thread.id = scoped.storageKey
+        displaySnapshot.thread.projectId = ScopedProjectID(
+            environmentID: scoped.environmentID,
+            projectID: snapshot.thread.projectId
+        ).storageKey
+        await applyDetail(displaySnapshot, scoped: scoped)
     }
 
     // MARK: - Milestones
@@ -774,6 +1909,7 @@ final class AgentStore {
             .sorted { $0.updatedAt > $1.updatedAt }
             .prefix(12)
             .compactMap { thread in
+                guard environmentID(for: thread) == localEnvironmentID else { return nil }
                 guard let branch = thread.branch?.nilIfBlank else { return nil }
                 // The project checkout is preferred over the worktree here: refs
                 // are shared, so one root per project keeps the git calls down.
@@ -831,7 +1967,7 @@ final class AgentStore {
         // Milestones land when the panel is idle in the notch, so open it —
         // otherwise the one moment worth seeing happens off-screen.
         presentation = .expanded
-        transport?.setExpanded(true)
+        coordinator.setExpanded(true)
         syncClock()
         celebrationTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(milestone.duration))
@@ -848,15 +1984,28 @@ final class AgentStore {
         }
     }
 
-    private func applyDetail(_ snapshot: ThreadDetailSnapshot) async {
+    private func applyDetail(
+        _ snapshot: ThreadDetailSnapshot,
+        scoped: ScopedThreadID? = nil
+    ) async {
         guard !isDemoRunning else { return }
         guard snapshot.thread.id == focusedThreadId else { return }
         threadDetail = snapshot.thread
         let activities = snapshot.thread.activities
         pendingApprovals = derivePendingApprovals(from: activities)
-            .filter { !answeredRequestIds.contains($0.requestId) }
+            .filter {
+                guard let scoped else { return !answeredRequestIds.contains($0.requestId) }
+                return !answeredRequestIds.contains(
+                    scopedRequestKey($0.requestId, thread: scoped)
+                )
+            }
         pendingUserInputs = derivePendingUserInputs(from: activities)
-            .filter { !answeredRequestIds.contains($0.requestId) }
+            .filter {
+                guard let scoped else { return !answeredRequestIds.contains($0.requestId) }
+                return !answeredRequestIds.contains(
+                    scopedRequestKey($0.requestId, thread: scoped)
+                )
+            }
         let previousPlan = plan
         plan = deriveActivePlanState(
             from: activities,
@@ -912,7 +2061,7 @@ final class AgentStore {
         // turn lands or a branch merges is exactly when nobody is hovering.
         if celebration != nil {
             presentation = .expanded
-            transport?.setExpanded(true)
+            coordinator.setExpanded(true)
             return
         }
 
@@ -926,13 +2075,13 @@ final class AgentStore {
             forceAttention || (needsAttention && presentation != .expanded && !userInitiated)
         {
             presentation = .attention
-            transport?.setExpanded(true)
+            coordinator.setExpanded(true)
             return
         }
 
         if isHovering {
             presentation = active.isEmpty && walkthrough == nil ? .pill : .expanded
-            transport?.setExpanded(presentation == .expanded)
+            coordinator.setExpanded(presentation == .expanded)
             return
         }
 
@@ -941,7 +2090,7 @@ final class AgentStore {
         // screen so the walkthrough is pointing at something.
         if let walkthrough {
             presentation = walkthrough.wantsPanel ? .expanded : .pill
-            transport?.setExpanded(presentation == .expanded)
+            coordinator.setExpanded(presentation == .expanded)
             return
         }
 
@@ -951,7 +2100,7 @@ final class AgentStore {
 
         if active.isEmpty {
             presentation = .hidden
-            transport?.setExpanded(false)
+            coordinator.setExpanded(false)
             return
         }
 
@@ -960,7 +2109,7 @@ final class AgentStore {
         }
 
         presentation = .pill
-        transport?.setExpanded(false)
+        coordinator.setExpanded(false)
     }
 
     func playAttentionSound() {

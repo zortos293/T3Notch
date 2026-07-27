@@ -84,6 +84,26 @@ PLIST
   -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP_DIR/Contents/Info.plist" >/dev/null
 echo "==> Version ${VERSION} (${BUILD_NUMBER})"
 
+# T3 Connect consumes only public client configuration. These production
+# defaults match T3 Code's packaged app; source-build environments may override
+# all three for a different public Clerk/relay deployment.
+CONNECT_CLERK_PUBLISHABLE_KEY="${T3CODE_CLERK_PUBLISHABLE_KEY:-pk_live_Y2xlcmsudDMuY29kZXMk}"
+CONNECT_JWT_TEMPLATE="${T3CODE_CLERK_JWT_TEMPLATE:-t3-relay}"
+CONNECT_RELAY_URL="${T3CODE_RELAY_URL:-https://relay.t3.codes}"
+
+if [[ -n "$CONNECT_CLERK_PUBLISHABLE_KEY" \
+   && -n "$CONNECT_JWT_TEMPLATE" \
+   && -n "$CONNECT_RELAY_URL" ]]; then
+  /usr/libexec/PlistBuddy \
+    -c "Add :T3ConnectClerkPublishableKey string $CONNECT_CLERK_PUBLISHABLE_KEY" \
+    -c "Add :T3ConnectJWTTemplate string $CONNECT_JWT_TEMPLATE" \
+    -c "Add :T3ConnectRelayURL string $CONNECT_RELAY_URL" \
+    "$APP_DIR/Contents/Info.plist" >/dev/null
+  echo "==> Embedded public T3 Connect configuration"
+else
+  echo "==> T3 Connect disabled (public configuration incomplete)"
+fi
+
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
   echo "==> Ad-hoc codesign"
   codesign --force --deep --sign - "$APP_DIR"

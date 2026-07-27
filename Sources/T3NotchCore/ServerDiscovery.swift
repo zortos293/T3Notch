@@ -1,16 +1,76 @@
 import Foundation
 
-public struct ServerEndpoint: Sendable, Equatable {
-    public var host: String
-    public var port: Int
+public enum ServerEndpointError: Error, LocalizedError, Sendable {
+    case unsupportedScheme
+    case missingHost
+    case credentialsNotAllowed
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedScheme: "Only HTTP and HTTPS endpoints are supported."
+        case .missingHost: "The endpoint is missing a host."
+        case .credentialsNotAllowed: "Endpoint URLs cannot contain credentials."
+        }
+    }
+}
+
+public struct ServerEndpoint: Codable, Sendable, Equatable, Hashable {
+    public let httpBaseURL: URL
+
+    public init(httpBaseURL: URL) throws {
+        guard let scheme = httpBaseURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https"
+        else {
+            throw ServerEndpointError.unsupportedScheme
+        }
+        guard httpBaseURL.host != nil else {
+            throw ServerEndpointError.missingHost
+        }
+        var components = URLComponents(url: httpBaseURL, resolvingAgainstBaseURL: false)
+        guard components?.user == nil, components?.password == nil else {
+            throw ServerEndpointError.credentialsNotAllowed
+        }
+        components?.scheme = scheme
+        components?.path = "/"
+        components?.query = nil
+        components?.fragment = nil
+        guard let canonical = components?.url else {
+            throw ServerEndpointError.missingHost
+        }
+        self.httpBaseURL = canonical
+    }
 
     public init(host: String = "127.0.0.1", port: Int = 3773) {
-        self.host = host
-        self.port = port
+        if host.contains(":") {
+            let literal = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            self.httpBaseURL = URL(string: "http://[\(literal)]:\(port)/")!
+            return
+        }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = port
+        components.path = "/"
+        self.httpBaseURL = components.url!
+    }
+
+    public var host: String { httpBaseURL.host ?? "" }
+    public var port: Int {
+        httpBaseURL.port ?? (httpBaseURL.scheme == "https" ? 443 : 80)
     }
 
     public var baseURL: URL {
-        URL(string: "http://\(host):\(port)")!
+        httpBaseURL
+    }
+
+    public var webSocketBaseURL: URL {
+        var components = URLComponents(url: httpBaseURL, resolvingAgainstBaseURL: false)!
+        components.scheme = httpBaseURL.scheme == "https" ? "wss" : "ws"
+        return components.url!
+    }
+
+    public var isLoopback: Bool {
+        host == "127.0.0.1" || host == "::1" || host.lowercased() == "localhost"
     }
 }
 

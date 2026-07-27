@@ -11,8 +11,13 @@ let package = Package(
         .executable(name: "T3Notch", targets: ["T3Notch"]),
     ],
     targets: [
+        .systemLibrary(
+            name: "CCommonCrypto",
+            path: "Sources/CCommonCrypto"
+        ),
         .target(
             name: "T3NotchCore",
+            dependencies: ["CCommonCrypto"],
             path: "Sources/T3NotchCore"
         ),
         .executableTarget(

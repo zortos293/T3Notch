@@ -167,6 +167,14 @@ private struct ExpandedBody: View {
 
                 if store.activeThreads.count > 1 {
                     ThreadCardDeck(store: store)
+                        .transition(
+                            .asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .top)),
+                                removal: .opacity.combined(
+                                    with: .scale(scale: 0.96, anchor: .top)
+                                )
+                            )
+                        )
                     Divider().overlay(Color.white.opacity(0.08))
                 }
 
@@ -197,6 +205,10 @@ private struct ExpandedBody: View {
             }
         }
         .padding(.top, 10)
+        .animation(
+            .spring(response: 0.34, dampingFraction: 0.86),
+            value: store.activeThreads.map(\.id)
+        )
         .animation(.spring(response: 0.45, dampingFraction: 0.8), value: store.celebration)
         .animation(.spring(response: 0.4, dampingFraction: 0.82), value: store.walkthrough)
         .overlay {
@@ -216,45 +228,75 @@ private struct ExpandedBody: View {
 private struct ThreadCardDeck: View {
     @Bindable var store: AgentStore
 
-    private var groups: [(project: ProjectShell, threads: [ThreadShell])] {
-        store.activeThreadsByProject
+    private var machines: [AgentStore.MachineThreadGroup] {
+        store.activeThreadsByMachine
     }
 
     var body: some View {
         // No heading and no count: the strip above already says how many are
         // running, and the project names label the cards well enough.
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(groups, id: \.project.id) { group in
+            ForEach(machines) { machine in
                 VStack(alignment: .leading, spacing: 5) {
-                    if groups.count > 1 {
-                        Text(group.project.title.uppercased())
-                            .font(.system(size: 8, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.35))
-                            .tracking(0.5)
-                            .lineLimit(1)
+                    if machines.count > 1 || machine.source != .local {
+                        HStack(spacing: 4) {
+                            Image(systemName: machine.source == .local ? "laptopcomputer" : "server.rack")
+                                .font(.system(size: 8, weight: .semibold))
+                            Text(machine.label.uppercased())
+                                .font(.system(size: 8, weight: .semibold, design: .rounded))
+                                .tracking(0.5)
+                        }
+                        .foregroundStyle(.white.opacity(0.42))
+                        .lineLimit(1)
+                        .accessibilityLabel("Machine \(machine.label)")
                     }
-                    // Wrapped rows instead of a scroller: every card stays
-                    // visible and clickable without a scroll gesture.
-                    ForEach(Array(rows(of: group.threads).enumerated()), id: \.offset) { row in
-                        HStack(alignment: .top, spacing: NotchGeometry.cardSpacing) {
-                            ForEach(row.element) { thread in
-                                ThreadCard(
-                                    store: store,
-                                    thread: thread,
-                                    isSelected: thread.id == store.focusedThread?.id
-                                )
+                    ForEach(machine.projects, id: \.project.id) { group in
+                        VStack(alignment: .leading, spacing: 5) {
+                            if machine.projects.count > 1 {
+                                Text(group.project.title.uppercased())
+                                    .font(.system(size: 8, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.35))
+                                    .tracking(0.5)
+                                    .lineLimit(1)
                             }
-                            Spacer(minLength: 0)
+                            LazyVGrid(
+                                columns: Array(
+                                    repeating: GridItem(
+                                        .fixed(NotchGeometry.cardWidth),
+                                        spacing: NotchGeometry.cardSpacing,
+                                        alignment: .top
+                                    ),
+                                    count: NotchGeometry.maxCardsPerRow
+                                ),
+                                alignment: .leading,
+                                spacing: 5
+                            ) {
+                                ForEach(group.threads) { thread in
+                                    ThreadCard(
+                                        store: store,
+                                        thread: thread,
+                                        isSelected: thread.id == store.focusedThread?.id
+                                    )
+                                    .transition(
+                                        .asymmetric(
+                                            insertion: .opacity.combined(
+                                                with: .scale(scale: 0.96)
+                                            ),
+                                            removal: .opacity.combined(
+                                                with: .scale(scale: 0.9)
+                                            )
+                                        )
+                                    )
+                                }
+                            }
+                            .animation(
+                                .spring(response: 0.32, dampingFraction: 0.84),
+                                value: group.threads.map(\.id)
+                            )
                         }
                     }
                 }
             }
-        }
-    }
-
-    private func rows(of threads: [ThreadShell]) -> [[ThreadShell]] {
-        stride(from: 0, to: threads.count, by: NotchGeometry.maxCardsPerRow).map { start in
-            Array(threads[start..<min(start + NotchGeometry.maxCardsPerRow, threads.count)])
         }
     }
 }
@@ -274,7 +316,13 @@ private struct ThreadCard: View {
 
     var body: some View {
         Button {
-            store.selectThread(thread.id)
+            if phase == .completed {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                    store.markReviewed(thread)
+                }
+            } else {
+                store.selectThread(thread.id)
+            }
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {

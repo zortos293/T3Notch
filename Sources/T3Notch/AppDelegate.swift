@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import SwiftUI
 
 @MainActor
@@ -12,6 +13,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Hidden until an update is worth mentioning.
     private var updateItem: NSMenuItem?
     private var statusItemBadged = false
+    private let networkMonitor = NWPathMonitor()
+    private let networkMonitorQueue = DispatchQueue(
+        label: "gg.t3tools.t3notch.network-monitor"
+    )
+    private var networkWasSatisfied = true
+    private var remoteRefreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -39,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installStatusItem()
         installMainMenu()
         store.bootstrap()
+        startConnectivityObservers()
         if settings.values.automaticUpdates {
             updater.start()
         }
@@ -60,6 +68,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.syncStatusItemBadge()
             }
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        networkMonitor.cancel()
+        remoteRefreshTimer?.invalidate()
+        remoteRefreshTimer = nil
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    private func startConnectivityObservers() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(macDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor in
+                guard let self else { return }
+                let isSatisfied = path.status == .satisfied
+                if isSatisfied && !self.networkWasSatisfied {
+                    self.store.handleConnectivityRestored()
+                }
+                self.networkWasSatisfied = isSatisfied
+            }
+        }
+        networkMonitor.start(queue: networkMonitorQueue)
+        remoteRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: 60,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                await self?.store.performRemoteMaintenance()
+            }
+        }
+    }
+
+    @objc private func macDidWake() {
+        store.handleConnectivityRestored()
     }
 
     private func installStatusItem() {
@@ -250,7 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func reconnect() {
-        store.bootstrap()
+        store.handleConnectivityRestored()
     }
 
     @objc private func quit() {

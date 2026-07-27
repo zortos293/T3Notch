@@ -36,7 +36,9 @@ needs an answer.
   and the files it changed, whatever is still in flight tinted.
 - **The task list** from the agent's plan, with a tick animation as steps land.
 - **Approvals and questions answered in place**, one slide at a time.
-- **One card per agent** when several are running, grouped by project.
+- **One card per agent** when several are running, grouped by machine and project.
+- **Local and remote machines together**, with direct LAN/Tailscale/HTTPS pairing
+  and an optional T3 Connect compatibility import.
 - **Finished agents stay pinned** until you have actually looked at them.
 - **Milestones get a moment**: a banner when a plan completes, confetti when a
   branch lands.
@@ -114,6 +116,105 @@ paste a bearer token into the panel. Tokens live in the Keychain under
 is not the build reading it — otherwise every update would open the Keychain's
 password prompt, which costs more than minting a fresh token does.
 
+That signature-change behavior applies only to the auto-remintable local token.
+Remote credentials use a separate, versioned Keychain vault and survive app
+updates. T3Notch asks you to unlock that vault if macOS requires access again; it
+never deletes a remote session merely because the app signature changed.
+
+## Remote machines
+
+T3Notch can monitor the T3 Code environments on a Mac mini, another MacBook, or
+any compatible remote server. This is agent monitoring and response—not screen
+sharing, a remote terminal, or general desktop control. The notch can:
+
+- show local and remote agents at the same time;
+- answer approvals and user questions on the machine that originated them;
+- interrupt the current turn;
+- deep-link to the corresponding remote T3 Code thread.
+
+It does not start agents, manage projects, inspect remote worktrees, or expose
+remote files. Merge watching remains local to this Mac.
+
+### Direct pairing
+
+On the machine running T3 Code, open **Settings → Connections**, enable network
+access, and create a pairing link. For a headless Mac mini, `npx t3 serve` prints
+the same link. On the Mac running T3Notch:
+
+1. Open **T3Notch → Settings → Machines**.
+2. Choose **Add…** and paste the complete pairing link.
+3. Alternatively, use the advanced backend URL and pairing-code fields.
+
+HTTPS or a private Tailnet is recommended. Plain HTTP is accepted for loopback;
+a non-loopback HTTP endpoint requires a separate, persisted acknowledgement.
+T3Notch reads the environment descriptor before consuming the one-time code,
+exchanges it for a DPoP-bound session with only
+`orchestration:read orchestration:operate`, verifies that session, and immediately
+forgets the pairing code. Tokens and URL fragments are never included in an
+opened thread URL.
+
+See T3 Code's [Remote Access guide](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md)
+for LAN, Tailscale, and HTTPS server setup.
+
+### T3 Connect compatibility import
+
+Release builds embed the same public production Clerk and relay configuration as
+T3 Code. **Import T3 Connect…** is enabled when T3 Code has a safe, recognized
+signed-in session at `~/.t3/userdata/clerk-tokens.json`. Detection checks
+ownership, permissions, file type, and schema without decrypting anything or
+touching Keychain. An unsafe file produces an explanatory Machines row with a
+copyable permission-fix command; T3Notch does not modify T3 Code’s file itself.
+Before copying that command or importing a session, T3Notch requires confirmation
+that the Mac is private and trusted. Do not use this compatibility import on a
+public, shared, borrowed, or otherwise untrusted Mac: `chmod 600` limits access
+to the current macOS account, but it cannot make a shared account safe.
+
+Import is explicit. macOS may ask once for access to T3 Code's Electron Safe
+Storage key; T3Notch copies the active Clerk client credential into its own
+Keychain and never modifies T3 Code's file, Keychain item, account, or linked
+environments. Production/nightly T3 Code storage is supported; dev-channel
+storage is intentionally not.
+
+T3 Connect is a compatibility adapter over the current upstream Clerk, relay, and
+Electron contracts. If T3 Code rotates its encrypted session, Settings reports
+that a new session is available and re-import remains a click. If T3 Code logs out
+or Clerk rejects the copy, T3Notch purges only its imported copy and asks you to
+import again. Direct and local monitoring continue independently.
+
+Source builds use the production public values by default and may override all
+three together for another deployment:
+
+```bash
+export T3CODE_CLERK_PUBLISHABLE_KEY=...
+export T3CODE_CLERK_JWT_TEMPLATE=t3-relay
+export T3CODE_RELAY_URL=https://relay.example.com
+./Scripts/bundle.sh release
+```
+
+No Clerk secret key is accepted or embedded. See T3 Code's
+[Connect configuration guide](https://github.com/pingdotgg/t3code/blob/main/docs/cloud/t3-connect-clerk.md).
+
+### Connection behavior
+
+Every enabled machine stays connected concurrently. Local discovery is
+independent and remains usable through remote failures. Active shells poll at
+800 ms; idle local and remote shells back off to 3 and 5 seconds respectively.
+Failures use jittered exponential backoff from 500 ms to 30 seconds, with
+immediate retry on wake, network restoration, and manual reconnect.
+
+When direct and T3 Connect access report the same stable environment ID, they
+appear as one logical machine. T3Notch prefers loopback, then a saved direct
+endpoint, falls back to Connect after repeated direct failure or credential
+expiry, probes direct every 60 seconds, and switches back after two successful
+probes.
+
+Remote profiles in `UserDefaults` contain only labels, endpoint URLs, enabled
+state, and the insecure-HTTP acknowledgement. Access tokens, imported Clerk
+credentials, relay tokens, and the app-scoped P-256 key live in the
+`gg.t3tools.t3notch` Keychain vault. Diagnostics deliberately exclude
+authorization headers, DPoP proofs, pairing credentials, Clerk tokens, OAuth
+credential bodies, and private keys.
+
 ## Settings
 
 **Settings…** in the menu bar item (⌘,) opens the control panel: dark rounded cards
@@ -179,11 +280,15 @@ Updates
 
 ## How it works
 
-- **T3NotchCore** — models, HTTP client, polling transport, derivations. No UI, and
-  the only part under test.
+- **T3NotchCore** — models, DPoP authorization, pairing and Connect clients,
+  per-machine polling, multi-environment coordination, and derivations. No UI,
+  and the only part under test.
 - **T3Notch** — the AppKit panel and the SwiftUI views.
 
-v1 polls `/api/orchestration/shell` and `/api/orchestration/threads/:id` adaptively.
+A session per enabled environment polls `/api/orchestration/shell` and
+`/api/orchestration/threads/:id` adaptively. Composite environment/thread IDs keep
+identical server-local IDs from colliding, and dispatch is always routed back to
+the originating environment.
 A WebSocket Effect-RPC transport can replace `PollingTransport` later behind the
 same `T3Transport` protocol.
 
