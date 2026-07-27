@@ -10,6 +10,7 @@ CONFIG="${1:-release}"
 # Releases set this so the bundle's version matches the tag.
 VERSION="${VERSION:-1.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 PRODUCT_DIR="$ROOT/.build/$CONFIG"
 APP_NAME="T3Notch"
 APP_DIR="$ROOT/dist/${APP_NAME}.app"
@@ -83,7 +84,14 @@ PLIST
   -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP_DIR/Contents/Info.plist" >/dev/null
 echo "==> Version ${VERSION} (${BUILD_NUMBER})"
 
-echo "==> Ad-hoc codesign"
-codesign --force --deep --sign - "$APP_DIR"
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  echo "==> Ad-hoc codesign"
+  codesign --force --deep --sign - "$APP_DIR"
+else
+  echo "==> Developer ID codesign (${SIGNING_IDENTITY})"
+  # Notarization requires the hardened runtime and a trusted timestamp.
+  codesign --force --deep --options runtime --timestamp \
+    --sign "$SIGNING_IDENTITY" "$APP_DIR"
+fi
 
 echo "==> Done: ${APP_DIR}"
