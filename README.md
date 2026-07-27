@@ -22,6 +22,10 @@ alt-tabbing to check: what is the agent doing right now. It stays a small pill
 while work runs, expands when you point at it, and opens itself when an agent
 needs an answer.
 
+> [!NOTE]
+> T3Notch is an independent project and is not affiliated with, endorsed by, or
+> sponsored by T3 or T3 Code.
+
 ![The collapsed pill](docs/pill.png)
 
 ## Highlights
