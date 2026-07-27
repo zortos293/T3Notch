@@ -1,0 +1,109 @@
+{
+  "snapshotSequence": 44,
+  "thread": {
+    "id": "thr_approval",
+    "projectId": "proj_1",
+    "title": "Needs shell",
+    "modelSelection": { "instanceId": "codex", "model": "gpt-5" },
+    "latestTurn": {
+      "turnId": "turn_2",
+      "state": "running",
+      "requestedAt": "2026-07-26T14:58:00.000Z",
+      "startedAt": "2026-07-26T14:58:01.000Z",
+      "completedAt": null,
+      "assistantMessageId": null
+    },
+    "createdAt": "2026-07-26T14:40:00.000Z",
+    "updatedAt": "2026-07-26T14:59:30.000Z",
+    "messages": [],
+    "session": {
+      "threadId": "thr_approval",
+      "status": "running",
+      "providerName": "codex",
+      "activeTurnId": "turn_2",
+      "lastError": null,
+      "updatedAt": "2026-07-26T14:59:30.000Z"
+    },
+    "activities": [
+      {
+        "id": "evt_1",
+        "tone": "info",
+        "kind": "turn.plan.updated",
+        "summary": "Plan updated",
+        "turnId": "turn_2",
+        "sequence": 1,
+        "createdAt": "2026-07-26T14:58:10.000Z",
+        "payload": {
+          "explanation": "Ship the feature",
+          "plan": [
+            { "step": "Read auth code", "status": "completed" },
+            { "step": "Add token mint", "status": "inProgress" },
+            { "step": "Wire notch UI", "status": "pending" }
+          ]
+        }
+      },
+      {
+        "id": "evt_2",
+        "tone": "tool",
+        "kind": "tool.started",
+        "summary": "Running shell: ls",
+        "turnId": "turn_2",
+        "sequence": 2,
+        "createdAt": "2026-07-26T14:58:20.000Z",
+        "payload": {}
+      },
+      {
+        "id": "evt_3",
+        "tone": "info",
+        "kind": "context-window.updated",
+        "summary": "Context updated",
+        "turnId": "turn_2",
+        "sequence": 3,
+        "createdAt": "2026-07-26T14:58:25.000Z",
+        "payload": {
+          "usedTokens": 42000,
+          "maxTokens": 200000,
+          "toolUses": 3
+        }
+      },
+      {
+        "id": "evt_4",
+        "tone": "approval",
+        "kind": "approval.requested",
+        "summary": "Approve command",
+        "turnId": "turn_2",
+        "sequence": 4,
+        "createdAt": "2026-07-26T14:59:00.000Z",
+        "payload": {
+          "requestId": "req_1",
+          "requestKind": "command",
+          "detail": "ls -la /tmp"
+        }
+      },
+      {
+        "id": "evt_5",
+        "tone": "approval",
+        "kind": "user-input.requested",
+        "summary": "Choose approach",
+        "turnId": "turn_2",
+        "sequence": 5,
+        "createdAt": "2026-07-26T14:59:10.000Z",
+        "payload": {
+          "requestId": "req_2",
+          "questions": [
+            {
+              "id": "q1",
+              "header": "Approach",
+              "question": "How should we ship?",
+              "multiSelect": false,
+              "options": [
+                { "label": "Fast", "description": "Ship a polling MVP" },
+                { "label": "Complete", "description": "Wait for WebSocket" }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

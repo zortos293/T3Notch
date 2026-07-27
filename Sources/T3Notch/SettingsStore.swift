@@ -1,0 +1,141 @@
+import AppKit
+import SwiftUI
+
+/// User-adjustable behaviour, persisted in `UserDefaults`.
+///
+/// Values live in one struct so the view can bind to any of them through a key
+/// path, and every write goes through `set`, which persists and then tells the
+/// app to re-read itself. Nothing here is cosmetic: each field is consumed
+/// somewhere that changes what the notch does.
+@MainActor
+@Observable
+final class SettingsStore {
+    struct Values: Equatable, Sendable {
+        /// Open the panel by itself when an agent needs an answer.
+        var expandOnAttention = true
+        /// Play a sound when that happens.
+        var soundOnAttention = true
+        /// Keep a finished agent pinned as a Done card until it is reviewed.
+        var keepFinishedUntilReviewed = true
+
+        /// Banner and tick animations for finished tasks and landed branches.
+        var celebrateMilestones = true
+        /// Confetti on the merge banner.
+        var confetti = true
+        /// Watch thread branches to notice when they land.
+        var watchMerges = true
+        /// Ask the GitHub CLI about pull requests, the only way to see a squash
+        /// merge. Off means local merges only.
+        var askForgeForMerges = true
+
+        /// Rows in the Activity feed.
+        var activityRows = 5
+        /// Rows in the task list before "+N more".
+        var taskRows = 5
+        /// `nil` prefers the built-in notched display.
+        var displayName: String?
+
+        /// Bring the T3 Code desktop app forward instead of opening the web UI,
+        /// when it is running.
+        var openInDesktopApp = true
+        /// Cleared once the quick start has been dismissed.
+        var needsQuickStart = true
+    }
+
+    private(set) var values: Values
+
+    /// Called after any change so the app can apply it without waiting for a poll.
+    var onChange: (@MainActor () -> Void)?
+
+    private let defaults: UserDefaults
+    private static let prefix = "settings."
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        values = Self.load(from: defaults)
+    }
+
+    func binding<V>(_ keyPath: WritableKeyPath<Values, V>) -> Binding<V> {
+        Binding(
+            get: { self.values[keyPath: keyPath] },
+            set: { self.set(keyPath, to: $0) }
+        )
+    }
+
+    func set<V>(_ keyPath: WritableKeyPath<Values, V>, to newValue: V) {
+        var updated = values
+        updated[keyPath: keyPath] = newValue
+        guard updated != values else { return }
+        values = updated
+        save()
+        onChange?()
+    }
+
+    func resetToDefaults() {
+        // Resetting preferences should not replay the onboarding.
+        let needsQuickStart = values.needsQuickStart
+        values = Values()
+        values.needsQuickStart = needsQuickStart
+        save()
+        onChange?()
+    }
+
+    /// Displays the notch can be pinned to, newest geometry first.
+    var availableDisplays: [String] {
+        NSScreen.screens.compactMap { $0.localizedName.nilIfBlank }
+    }
+
+    private static func load(from defaults: UserDefaults) -> Values {
+        var values = Values()
+
+        func bool(_ key: String, _ fallback: Bool) -> Bool {
+            defaults.object(forKey: prefix + key) as? Bool ?? fallback
+        }
+        func int(_ key: String, _ fallback: Int, in range: ClosedRange<Int>) -> Int {
+            guard let stored = defaults.object(forKey: prefix + key) as? Int else { return fallback }
+            return min(max(stored, range.lowerBound), range.upperBound)
+        }
+
+        values.expandOnAttention = bool("expandOnAttention", values.expandOnAttention)
+        values.soundOnAttention = bool("soundOnAttention", values.soundOnAttention)
+        values.keepFinishedUntilReviewed = bool(
+            "keepFinishedUntilReviewed",
+            values.keepFinishedUntilReviewed
+        )
+        values.celebrateMilestones = bool("celebrateMilestones", values.celebrateMilestones)
+        values.confetti = bool("confetti", values.confetti)
+        values.watchMerges = bool("watchMerges", values.watchMerges)
+        values.askForgeForMerges = bool("askForgeForMerges", values.askForgeForMerges)
+        values.activityRows = int("activityRows", values.activityRows, in: Self.rowRange)
+        values.taskRows = int("taskRows", values.taskRows, in: Self.rowRange)
+        values.displayName = defaults.string(forKey: prefix + "displayName")?.nilIfBlank
+        values.openInDesktopApp = bool("openInDesktopApp", values.openInDesktopApp)
+        values.needsQuickStart = bool("needsQuickStart", values.needsQuickStart)
+
+        return values
+    }
+
+    private func save() {
+        defaults.set(values.expandOnAttention, forKey: Self.prefix + "expandOnAttention")
+        defaults.set(values.soundOnAttention, forKey: Self.prefix + "soundOnAttention")
+        defaults.set(
+            values.keepFinishedUntilReviewed,
+            forKey: Self.prefix + "keepFinishedUntilReviewed"
+        )
+        defaults.set(values.celebrateMilestones, forKey: Self.prefix + "celebrateMilestones")
+        defaults.set(values.confetti, forKey: Self.prefix + "confetti")
+        defaults.set(values.watchMerges, forKey: Self.prefix + "watchMerges")
+        defaults.set(values.askForgeForMerges, forKey: Self.prefix + "askForgeForMerges")
+        defaults.set(values.activityRows, forKey: Self.prefix + "activityRows")
+        defaults.set(values.taskRows, forKey: Self.prefix + "taskRows")
+        defaults.set(values.openInDesktopApp, forKey: Self.prefix + "openInDesktopApp")
+        defaults.set(values.needsQuickStart, forKey: Self.prefix + "needsQuickStart")
+        if let displayName = values.displayName {
+            defaults.set(displayName, forKey: Self.prefix + "displayName")
+        } else {
+            defaults.removeObject(forKey: Self.prefix + "displayName")
+        }
+    }
+
+    static let rowRange = 3...8
+}

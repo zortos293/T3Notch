@@ -1,0 +1,74 @@
+{
+  "snapshotSequence": 12,
+  "updatedAt": "2026-07-26T15:00:00.000Z",
+  "projects": [
+    {
+      "id": "proj_1",
+      "title": "Demo",
+      "workspaceRoot": "/tmp/demo",
+      "createdAt": "2026-07-26T14:00:00.000Z",
+      "updatedAt": "2026-07-26T15:00:00.000Z"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thr_running",
+      "projectId": "proj_1",
+      "title": "Add login",
+      "modelSelection": { "instanceId": "claude", "model": "claude-opus" },
+      "runtimeMode": "full-access",
+      "latestTurn": {
+        "turnId": "turn_1",
+        "state": "running",
+        "requestedAt": "2026-07-26T14:59:00.000Z",
+        "startedAt": "2026-07-26T14:59:01.000Z",
+        "completedAt": null,
+        "assistantMessageId": null
+      },
+      "createdAt": "2026-07-26T14:50:00.000Z",
+      "updatedAt": "2026-07-26T15:00:00.000Z",
+      "archivedAt": null,
+      "settledAt": null,
+      "session": {
+        "threadId": "thr_running",
+        "status": "running",
+        "providerName": "claude",
+        "activeTurnId": "turn_1",
+        "lastError": null,
+        "updatedAt": "2026-07-26T15:00:00.000Z"
+      },
+      "latestUserMessageAt": "2026-07-26T14:59:00.000Z",
+      "hasPendingApprovals": false,
+      "hasPendingUserInput": false,
+      "hasActionableProposedPlan": false
+    },
+    {
+      "id": "thr_approval",
+      "projectId": "proj_1",
+      "title": "Needs shell",
+      "modelSelection": { "instanceId": "codex", "model": "gpt-5" },
+      "latestTurn": {
+        "turnId": "turn_2",
+        "state": "running",
+        "requestedAt": "2026-07-26T14:58:00.000Z",
+        "startedAt": "2026-07-26T14:58:01.000Z",
+        "completedAt": null,
+        "assistantMessageId": null
+      },
+      "createdAt": "2026-07-26T14:40:00.000Z",
+      "updatedAt": "2026-07-26T14:59:30.000Z",
+      "archivedAt": null,
+      "session": {
+        "threadId": "thr_approval",
+        "status": "running",
+        "providerName": "codex",
+        "activeTurnId": "turn_2",
+        "lastError": null,
+        "updatedAt": "2026-07-26T14:59:30.000Z"
+      },
+      "hasPendingApprovals": true,
+      "hasPendingUserInput": false,
+      "hasActionableProposedPlan": false
+    }
+  ]
+}
