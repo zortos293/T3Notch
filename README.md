@@ -84,7 +84,9 @@ while you read, so every claim on screen is visible a few centimetres higher.
 
 It then asks a question, in the notch, and waits — answering it there is how the
 tour advances, and a second question slides in behind the first to show the queue.
-Its plan finishes on the last page, banner and all.
+Its plan finishes with a banner, two more pretend agents move in behind it — one in
+another project, one wanting an answer — and pressing any of their cards swaps the
+panel over to that agent, which is the whole trick of running several at once.
 
 The tour ends on a connection test that is not a mock: every step makes the request
 it describes, and failures print what came back along with the command to fix it.
@@ -92,8 +94,10 @@ it describes, and failures print what came back along with the command to fix it
 ![The connection test at the end of the tour](docs/quickstart-check.png)
 
 Nothing in the walkthrough touches your real agents — polling is suspended for as
-long as the window is open, and the pretend agent is discarded when it closes. You
-can replay it any time from **Settings → Quick start**.
+long as the window is open, and the pretend ones are discarded when it closes. They
+are marked by a small **Demo** badge next to the notch's clock, which is the only
+difference between the tour's panel and the real one. You can replay it any time
+from **Settings → Quick start**.
 
 ## Install
 

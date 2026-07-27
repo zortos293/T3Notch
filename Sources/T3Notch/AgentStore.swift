@@ -166,11 +166,13 @@ final class AgentStore {
     /// panel keeps showing the pretend one until the window is done with it.
     private(set) var isDemoRunning = false
     private var demoAnswerHandler: (() -> Void)?
+    private var demoFocusHandler: ((String) -> Void)?
 
-    func beginDemo(onAnswer: @escaping () -> Void) {
+    func beginDemo(onAnswer: @escaping () -> Void, onFocus: @escaping (String) -> Void) {
         guard !isDemoRunning else { return }
         isDemoRunning = true
         demoAnswerHandler = onAnswer
+        demoFocusHandler = onFocus
         // Real agents step aside rather than share the panel with a fake one.
         threads = []
         projects = []
@@ -188,6 +190,7 @@ final class AgentStore {
         guard isDemoRunning else { return }
         isDemoRunning = false
         demoAnswerHandler = nil
+        demoFocusHandler = nil
         dismissCelebration()
         threads = []
         projects = []
@@ -205,20 +208,35 @@ final class AgentStore {
         projects: [ProjectShell],
         threads: [ThreadShell],
         plan: ActivePlanState?,
-        context: ContextWindowSnapshot?
+        context: ContextWindowSnapshot?,
+        focus: String? = nil
     ) {
         guard isDemoRunning else { return }
         self.projects = projects
         self.threads = threads
         self.plan = plan
         contextWindow = context
-        focusedThreadId = threads.first?.id
+        focusedThreadId = focus ?? threads.first?.id
         recomputePresentation(userInitiated: false)
     }
 
     func demoActivity(_ events: [ActivityEvent]) {
         guard isDemoRunning else { return }
         recentActivity = events
+    }
+
+    /// Everything the panel shows below the cards, for whichever pretend agent the
+    /// reader just pressed.
+    func demoDetail(
+        plan: ActivePlanState?,
+        activity: [ActivityEvent],
+        context: ContextWindowSnapshot?
+    ) {
+        guard isDemoRunning else { return }
+        self.plan = plan
+        recentActivity = activity
+        contextWindow = context
+        taskCompletionTicks = [:]
     }
 
     /// Bumping the tick is what makes the finished row animate, the same way a
@@ -527,6 +545,14 @@ final class AgentStore {
 
     func selectThread(_ id: String) {
         guard id != focusedThreadId else { return }
+        // A pretend agent has no detail stream to swap to, so the demo hands over
+        // the card's plan and activity itself.
+        if isDemoRunning {
+            focusedThreadId = id
+            demoFocusHandler?(id)
+            recomputePresentation(userInitiated: true)
+            return
+        }
         focusedThreadId = id
         // Detail arrives a poll later; drop the old thread's data so the card
         // never shows another agent's questions, plan, or context.

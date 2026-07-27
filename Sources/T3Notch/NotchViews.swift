@@ -106,6 +106,12 @@ private struct TopStrip: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.orange)
                 }
+                // A pretend agent has to say so somewhere, and a badge beside the
+                // clock costs a strip that is already there — a banner over the
+                // panel pushed everything worth reading further down.
+                if let caption = store.walkthrough?.caption {
+                    WalkthroughChip(caption: caption)
+                }
                 if store.activeThreads.count > 1 {
                     Text("\(store.activeThreads.count)")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -148,11 +154,6 @@ private struct ExpandedBody: View {
                     .font(.system(size: 10, design: .rounded))
                     .foregroundStyle(.white.opacity(0.35))
             } else {
-                if let caption = store.walkthrough?.caption {
-                    WalkthroughBanner(caption: caption)
-                        .transition(.push(from: .top).combined(with: .opacity))
-                }
-
                 if let celebration = store.celebration {
                     CelebrationBanner(celebration: celebration)
                         .transition(
@@ -171,10 +172,6 @@ private struct ExpandedBody: View {
                 HeaderRow(store: store)
                 MachineRow(store: store)
 
-                if let thread = store.focusedThread, store.awaitsReview(thread) {
-                    ReviewBar(store: store, thread: thread)
-                }
-
                 if !store.recentActivity.isEmpty {
                     ActivityFeed(events: store.recentActivity)
                 }
@@ -189,6 +186,12 @@ private struct ExpandedBody: View {
 
                 if !store.pendingApprovals.isEmpty || !store.pendingUserInputs.isEmpty {
                     PromptCarousel(store: store)
+                }
+
+                // Last, not first: what the agent did is what you look up for, and
+                // a review bar above it pushed all of it down a row.
+                if let thread = store.focusedThread, store.awaitsReview(thread) {
+                    ReviewBar(store: store, thread: thread)
                 }
             }
         }
@@ -507,8 +510,42 @@ private struct ReviewBar: View {
     }
 }
 
-/// The notch's half of the welcome: what the pretend agent is up to, or how the
-/// connection test is going. Deliberately loud about being a demonstration.
+/// Marks the panel as a demonstration from the top strip, next to the clock, so
+/// the pretend agent below it reads exactly like a real one.
+private struct WalkthroughChip: View {
+    let caption: Walkthrough.Caption
+
+    var body: some View {
+        // The strip's shoulder is only as wide as the screen's notch leaves it, so
+        // the word goes rather than being clipped to "De…".
+        ViewThatFits(in: .horizontal) {
+            chip(withLabel: true)
+            chip(withLabel: false)
+        }
+        .animation(notchSpring, value: caption)
+    }
+
+    private func chip(withLabel: Bool) -> some View {
+        HStack(spacing: 3.5) {
+            Image(systemName: caption.symbol)
+                .font(.system(size: 8.5, weight: .bold))
+                .contentTransition(.symbolEffect(.replace))
+            if withLabel {
+                Text(caption.chip)
+                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
+                    .fixedSize()
+            }
+        }
+        .foregroundStyle(caption.tint)
+        .padding(.horizontal, withLabel ? 6 : 4)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(caption.tint.opacity(0.16)))
+        .overlay(Capsule().stroke(caption.tint.opacity(0.4), lineWidth: 1))
+    }
+}
+
+/// The notch's half of the welcome, for when there is no agent to point at: the
+/// connection test, for instance, runs on an otherwise empty panel.
 private struct WalkthroughBanner: View {
     let caption: Walkthrough.Caption
 

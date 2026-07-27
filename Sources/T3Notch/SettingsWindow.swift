@@ -107,9 +107,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// expanded notch, and the walkthrough is meant to be read while watching it.
     private func sitClearOfTheNotch(_ window: NSWindow) {
         guard let screen = window.screen ?? NSScreen.main else { return }
-        // Deep enough for the tallest thing the walkthrough puts in the notch: a
-        // pretend agent with its activity and plan, plus a question above them.
-        let clearance: CGFloat = 580
+        // Deep enough for the tallest thing the walkthrough puts in the notch:
+        // three agents' cards above one of their activity, plan and question.
+        let clearance: CGFloat = 600
         var frame = window.frame
         let highestTop = screen.frame.maxY - clearance
         frame.origin.y = min(frame.origin.y, highestTop - frame.height)

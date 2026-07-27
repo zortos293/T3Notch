@@ -17,6 +17,8 @@ struct Walkthrough: Equatable {
         case asking
         /// Its plan landed.
         case landed
+        /// Several pretend agents at once; the flag turns once a card is pressed.
+        case crowd(switched: Bool)
         /// The real connection test, echoed as it runs.
         case testing(Status)
     }
@@ -35,8 +37,9 @@ struct Walkthrough: Equatable {
         stage != .waiting
     }
 
-    /// Caption drawn above the demo, so a pretend agent is never mistaken for a
-    /// real one. Nil while the panel is showing real work.
+    /// What the notch says about itself while the tour runs: a badge in the top
+    /// strip, and the whole caption when there is no agent to put one beside.
+    /// Nil while the panel is showing real work.
     var caption: Caption? {
         switch stage {
         case .waiting:
@@ -53,7 +56,8 @@ struct Walkthrough: Equatable {
                 title: "Your turn",
                 detail: "Answer below — this is how real questions arrive.",
                 symbol: "hand.point.down.fill",
-                tint: .orange
+                tint: .orange,
+                chip: "Your turn"
             )
         case .landed:
             return Caption(
@@ -62,6 +66,15 @@ struct Walkthrough: Equatable {
                 symbol: "checkmark.seal.fill",
                 tint: .green
             )
+        case let .crowd(switched):
+            return Caption(
+                title: switched ? "That is the switch" : "Three pretend agents",
+                detail: switched
+                    ? "The panel below follows whichever card is lit."
+                    : "Press another card to follow it instead.",
+                symbol: switched ? "checkmark.seal.fill" : "square.stack.3d.up.fill",
+                tint: switched ? .green : .cyan
+            )
         case let .testing(status):
             switch status {
             case .running:
@@ -69,21 +82,24 @@ struct Walkthrough: Equatable {
                     title: "Testing the connection",
                     detail: "Asking the local server who is running.",
                     symbol: "antenna.radiowaves.left.and.right",
-                    tint: .cyan
+                    tint: .cyan,
+                    chip: "Testing"
                 )
             case let .passed(summary):
                 return Caption(
                     title: "Connected to T3 Code",
                     detail: summary,
                     symbol: "checkmark.circle.fill",
-                    tint: .green
+                    tint: .green,
+                    chip: "Connected"
                 )
             case let .failed(message):
                 return Caption(
                     title: "Cannot reach T3 Code",
                     detail: message,
                     symbol: "exclamationmark.triangle.fill",
-                    tint: .orange
+                    tint: .orange,
+                    chip: "No answer"
                 )
             }
         }
@@ -94,6 +110,8 @@ struct Walkthrough: Equatable {
         let detail: String
         let symbol: String
         let tint: Color
+        /// A word or two, for the badge in the top strip.
+        var chip: String = "Demo"
         var isBusy: Bool = false
     }
 }

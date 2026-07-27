@@ -21,6 +21,7 @@ final class DemoAgent {
         case working
         case asking
         case landing
+        case crowd
     }
 
     private let store: AgentStore
@@ -29,6 +30,8 @@ final class DemoAgent {
 
     /// Called when the reader answers the demo's question in the notch.
     var onAnswered: (() -> Void)?
+    /// Called when the reader presses another agent's card.
+    var onSwitched: (() -> Void)?
 
     init(store: AgentStore) {
         self.store = store
@@ -41,7 +44,10 @@ final class DemoAgent {
     func start() {
         guard !store.isDemoRunning else { return }
         startedAt = Date()
-        store.beginDemo { [weak self] in self?.answered() }
+        store.beginDemo(
+            onAnswer: { [weak self] in self?.answered() },
+            onFocus: { [weak self] id in self?.focused(id) }
+        )
         install(phase: .running)
         store.stage(.demo)
         play {
@@ -88,6 +94,21 @@ final class DemoAgent {
         }
     }
 
+    /// Fills the deck. Two more pretend agents move in, one of them in another
+    /// project and one of them wanting an answer, because a single card says
+    /// nothing about what an afternoon with several chats running looks like.
+    func crowd() {
+        guard store.isDemoRunning else { return }
+        cancelScript()
+        store.demoPrompt(nil, on: Self.threadId)
+        // The merge banner belongs to the page before this one, and the cards
+        // need the room more than a celebration that has been read.
+        store.dismissCelebration()
+        if understudies.isEmpty { understudies = Self.makeUnderstudies() }
+        install(phase: .running)
+        store.stage(.crowd(switched: false))
+    }
+
     /// Hands the panel back to the real agents.
     func stop() {
         cancelScript()
@@ -117,6 +138,26 @@ final class DemoAgent {
         onAnswered?()
     }
 
+    /// A card was pressed. Real threads have a detail stream to swap to; these
+    /// carry their plan and activity around with them instead.
+    private func focused(_ id: String) {
+        if let understudy = understudies.first(where: { $0.thread.id == id }) {
+            store.demoDetail(
+                plan: understudy.plan,
+                activity: understudy.activity,
+                context: understudy.context
+            )
+            store.stage(.crowd(switched: true))
+            onSwitched?()
+        } else {
+            store.demoDetail(
+                plan: currentPlan,
+                activity: Array(Self.activity.suffix(max(3, store.settingsValues.activityRows))),
+                context: Self.mainContext
+            )
+        }
+    }
+
     // MARK: - Fake world
 
     private func install(phase: DemoPhase) {
@@ -139,16 +180,21 @@ final class DemoAgent {
             hasPendingApprovals: false,
             hasPendingUserInput: phase == .asking
         )
+        var projects = [ProjectShell(id: Self.projectId, title: "T3Notch")]
+        var threads = [thread]
+        for understudy in understudies {
+            threads.append(understudy.thread)
+            if !projects.contains(where: { $0.id == understudy.project.id }) {
+                projects.append(understudy.project)
+            }
+        }
+
         store.demoWorld(
-            projects: [ProjectShell(id: Self.projectId, title: "T3Notch")],
-            threads: [thread],
+            projects: projects,
+            threads: threads,
             plan: currentPlan,
-            context: ContextWindowSnapshot(
-                usedTokens: 41_000,
-                maxTokens: 272_000,
-                usedPercentage: 15,
-                updatedAt: ISO8601Parsing.nowString()
-            )
+            context: Self.mainContext,
+            focus: thread.id
         )
     }
 
@@ -156,6 +202,164 @@ final class DemoAgent {
         case running
         case asking
         case completed
+    }
+
+    /// A pretend agent with no story of its own: it exists to be a second card,
+    /// so it carries the panel's whole lower half around with it.
+    private struct Understudy {
+        let project: ProjectShell
+        let thread: ThreadShell
+        let plan: ActivePlanState
+        let activity: [ActivityEvent]
+        let context: ContextWindowSnapshot
+    }
+
+    /// Built when the deck fills rather than up front, so their clocks read as
+    /// having been running for a while by the time they are on screen.
+    private var understudies: [Understudy] = []
+
+    private static func makeUnderstudies() -> [Understudy] {
+        let now = ISO8601Parsing.nowString()
+        let t3notch = ProjectShell(id: projectId, title: "T3Notch")
+        let opennow = ProjectShell(id: "demo-project-2", title: "opennow")
+
+        return [
+            Understudy(
+                project: t3notch,
+                thread: ThreadShell(
+                    id: "demo-thread-2",
+                    projectId: t3notch.id,
+                    title: "Trim the settings panel",
+                    modelSelection: ModelSelection(
+                        instanceId: "claude",
+                        model: "claude-opus-5"
+                    ),
+                    branch: "t3notch/settings-trim",
+                    worktreePath: "/Users/you/Projects/t3notch",
+                    latestTurn: turn(startedMinutesAgo: 7),
+                    updatedAt: now,
+                    hasPendingApprovals: false,
+                    hasPendingUserInput: false
+                ),
+                plan: plan(
+                    ["Measure the cards", "Cut the padding", "Re-render the docs"],
+                    completed: 1
+                ),
+                activity: [
+                    ActivityEvent(
+                        id: "demo-2-1",
+                        kind: .fileChange,
+                        label: "Read file",
+                        detail: "Sources/T3Notch/SettingsView.swift",
+                        isRunning: false,
+                        createdAt: now
+                    ),
+                    ActivityEvent(
+                        id: "demo-2-2",
+                        kind: .command,
+                        label: "Ran command",
+                        detail: "swift build",
+                        isRunning: true,
+                        createdAt: now
+                    ),
+                ],
+                context: ContextWindowSnapshot(
+                    usedTokens: 87_000,
+                    maxTokens: 272_000,
+                    usedPercentage: 32,
+                    updatedAt: now
+                )
+            ),
+            Understudy(
+                project: opennow,
+                thread: ThreadShell(
+                    id: "demo-thread-3",
+                    projectId: opennow.id,
+                    title: "Fix the switch reconnect lag",
+                    modelSelection: ModelSelection(
+                        instanceId: "cursor",
+                        model: "composer-2.5"
+                    ),
+                    branch: "opennow/reconnect",
+                    worktreePath: "/Users/you/Projects/opennow",
+                    latestTurn: turn(startedMinutesAgo: 21),
+                    updatedAt: now,
+                    hasPendingApprovals: false,
+                    // The orange card is the point of this one: an agent in
+                    // another project can want you while you read about this one.
+                    hasPendingUserInput: true
+                ),
+                plan: plan(
+                    ["Reproduce the drop", "Instrument the socket", "Pick a backoff"],
+                    completed: 2
+                ),
+                activity: [
+                    ActivityEvent(
+                        id: "demo-3-1",
+                        kind: .search,
+                        label: "Searched",
+                        detail: "reconnectAttempts",
+                        isRunning: false,
+                        createdAt: now
+                    ),
+                    ActivityEvent(
+                        id: "demo-3-2",
+                        kind: .fileChange,
+                        label: "Edited file",
+                        detail: "src/net/socket.ts",
+                        isRunning: false,
+                        createdAt: now
+                    ),
+                    ActivityEvent(
+                        id: "demo-3-3",
+                        kind: .command,
+                        label: "Ran command",
+                        detail: "npm run test:net",
+                        isRunning: false,
+                        createdAt: now
+                    ),
+                ],
+                context: ContextWindowSnapshot(
+                    usedTokens: 139_000,
+                    maxTokens: 272_000,
+                    usedPercentage: 51,
+                    updatedAt: now
+                )
+            ),
+        ]
+    }
+
+    private static func turn(startedMinutesAgo minutes: Int) -> LatestTurn {
+        let started = Date().addingTimeInterval(-Double(minutes) * 60)
+        return LatestTurn(
+            turnId: "demo-turn-\(minutes)",
+            state: "running",
+            requestedAt: started.formatted(.iso8601),
+            startedAt: started.formatted(.iso8601),
+            completedAt: nil
+        )
+    }
+
+    private static func plan(_ steps: [String], completed: Int) -> ActivePlanState {
+        ActivePlanState(
+            steps: steps.enumerated().map { index, step in
+                PlanStep(
+                    step: step,
+                    status: index < completed
+                        ? .completed : (index == completed ? .inProgress : .pending)
+                )
+            },
+            updatedAt: ISO8601Parsing.nowString()
+        )
+    }
+
+    private static var mainContext: ContextWindowSnapshot {
+        ContextWindowSnapshot(
+            usedTokens: 41_000,
+            maxTokens: 272_000,
+            usedPercentage: 15,
+            updatedAt: ISO8601Parsing.nowString()
+        )
     }
 
     private var completedSteps = 0

@@ -16,6 +16,7 @@ struct QuickStartView: View {
 
     @State private var chapter: Chapter = .welcome
     @State private var answeredTheDemo = false
+    @State private var switchedCards = false
     @State private var check = ConnectionCheck()
 
     private static let brand = Color(red: 0.21, green: 0.44, blue: 0.98)
@@ -26,6 +27,7 @@ struct QuickStartView: View {
         case working
         case answering
         case landing
+        case crowd
         case connection
 
         static func < (lhs: Chapter, rhs: Chapter) -> Bool { lhs.rawValue < rhs.rawValue }
@@ -42,6 +44,7 @@ struct QuickStartView: View {
         .background(background)
         .task {
             demo.onAnswered = { answeredTheDemo = true }
+            demo.onSwitched = { switchedCards = true }
         }
         .onChange(of: answeredTheDemo) { _, answered in
             guard answered, chapter == .answering else { return }
@@ -113,7 +116,11 @@ struct QuickStartView: View {
                 ]
             )
         case .answering:
-            AnswerPrompt(answered: answeredTheDemo)
+            NotchNudge(
+                done: answeredTheDemo,
+                waiting: "Waiting for your answer in the notch…",
+                finished: "Answered in the notch."
+            )
         case .landing:
             PointerList(
                 items: [
@@ -122,6 +129,21 @@ struct QuickStartView: View {
                     .init(symbol: "slider.horizontal.3", text: "All of it adjustable later, with ⌘, "),
                 ]
             )
+        case .crowd:
+            VStack(alignment: .leading, spacing: 14) {
+                PointerList(
+                    items: [
+                        .init(symbol: "folder", text: "Grouped by project, so two repos never blur together"),
+                        .init(symbol: "circle.badge.exclamationmark", text: "An orange card is an agent waiting on you"),
+                    ]
+                )
+                NotchNudge(
+                    done: switchedCards,
+                    waiting: "Press another card in the notch…",
+                    finished: "The panel is following that one now.",
+                    tint: Self.brand
+                )
+            }
         case .connection:
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(check.steps) { step in
@@ -150,6 +172,11 @@ struct QuickStartView: View {
                 symbol: answeredTheDemo ? "checkmark.circle.fill" : "questionmark.bubble.fill"
             )
         case .landing: LookUpHero(tint: .green, symbol: "party.popper.fill")
+        case .crowd:
+            LookUpHero(
+                tint: switchedCards ? .green : .cyan,
+                symbol: switchedCards ? "checkmark.circle.fill" : "square.stack.3d.up.fill"
+            )
         case .connection: ConnectionHero(outcome: check.isRunning ? nil : check.failure == nil)
         }
     }
@@ -161,6 +188,8 @@ struct QuickStartView: View {
         case .answering:
             return answeredTheDemo ? "That is all there is to it" : "Now it needs an answer"
         case .landing: return "You will know when it lands"
+        case .crowd:
+            return switchedCards ? "Whichever one you pick" : "It is never just one agent"
         case .connection:
             if check.isRunning { return "Checking the connection" }
             return check.failure == nil ? "Everything answered" : "T3 Code is not answering"
@@ -184,6 +213,12 @@ struct QuickStartView: View {
         case .landing:
             return "A finished plan gets a banner, a landed branch gets confetti, and the "
                 + "panel opens itself — these moments never happen while you are watching."
+        case .crowd:
+            return switchedCards
+                ? "Its plan, its commands and its machine took over the panel below the "
+                    + "cards. The others carry on regardless."
+                : "Two more just moved in, one of them in another project. Every card is "
+                    + "pressable, and the panel below follows the one you press."
         case .connection:
             if check.isRunning { return "Making the real requests, one at a time." }
             if let failure = check.failure {
@@ -232,7 +267,10 @@ struct QuickStartView: View {
         case .welcome: "Show me"
         case .working: "Next"
         case .answering: answeredTheDemo ? "Next" : nil
-        case .landing: "Nearly done"
+        case .landing: "Next"
+        // Pressing a card is invited, not required: the button stays live so a
+        // reader who would rather not poke at the notch is never stuck here.
+        case .crowd: switchedCards ? "Nearly done" : "Next"
         case .connection: "Start using T3Notch"
         }
     }
@@ -255,6 +293,8 @@ struct QuickStartView: View {
             demo.ask()
         case .landing:
             demo.land()
+        case .crowd:
+            demo.crowd()
         case .connection:
             // The pretend agent bows out before anything real is measured.
             demo.stop()
@@ -451,18 +491,21 @@ private struct PointerList: View {
     }
 }
 
-/// The one place the tour waits for the reader instead of a button.
-private struct AnswerPrompt: View {
-    let answered: Bool
+/// The places where the tour waits for the reader instead of for a button.
+private struct NotchNudge: View {
+    let done: Bool
+    let waiting: String
+    let finished: String
+    var tint: Color = .orange
 
     var body: some View {
         HStack(spacing: 11) {
             ZStack {
-                if answered {
+                if done {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.green)
-                        .symbolEffect(.bounce, value: answered)
+                        .symbolEffect(.bounce, value: done)
                 } else {
                     WorkingPulse()
                         .frame(width: 9, height: 9)
@@ -470,13 +513,9 @@ private struct AnswerPrompt: View {
             }
             .frame(width: 18)
 
-            Text(
-                answered
-                    ? "Answered in the notch."
-                    : "Waiting for your answer in the notch…"
-            )
-            .font(.system(size: 12.5, weight: .medium, design: .rounded))
-            .foregroundStyle(.white.opacity(answered ? 0.85 : 0.6))
+            Text(done ? finished : waiting)
+                .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(done ? 0.85 : 0.6))
 
             Spacer(minLength: 0)
         }
@@ -484,13 +523,13 @@ private struct AnswerPrompt: View {
         .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill((answered ? Color.green : Color.orange).opacity(0.1))
+                .fill((done ? Color.green : tint).opacity(0.1))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke((answered ? Color.green : Color.orange).opacity(0.28), lineWidth: 1)
+                .stroke((done ? Color.green : tint).opacity(0.28), lineWidth: 1)
         )
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: answered)
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: done)
     }
 }
 
