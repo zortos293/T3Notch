@@ -221,16 +221,9 @@ private struct ThreadCardDeck: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                SectionLabel("Agents")
-                Text("\(store.activeThreads.count)")
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(.white.opacity(0.85)))
-                Spacer(minLength: 0)
-            }
+            // No count here: the top strip already carries one, level with the
+            // clock, and two of them a centimetre apart just read as a mistake.
+            SectionLabel("Agents")
 
             ForEach(groups, id: \.project.id) { group in
                 VStack(alignment: .leading, spacing: 5) {
