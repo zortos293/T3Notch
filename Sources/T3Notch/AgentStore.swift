@@ -129,7 +129,9 @@ final class AgentStore {
         dismissCelebration()
         reviewStore.insert(completionKey(for: thread))
         if focusedThreadId == thread.id {
-            focusedThreadId = activeThreads.first { $0.id != thread.id }?.id
+            replaceFocusedThread(
+                with: activeThreads.first { $0.id != thread.id }?.id
+            )
         }
         recomputePresentation(userInitiated: true)
     }
@@ -553,18 +555,7 @@ final class AgentStore {
             recomputePresentation(userInitiated: true)
             return
         }
-        focusedThreadId = id
-        // Detail arrives a poll later; drop the old thread's data so the card
-        // never shows another agent's questions, plan, or context.
-        threadDetail = nil
-        pendingApprovals = []
-        pendingUserInputs = []
-        plan = nil
-        taskCompletionTicks = [:]
-        contextWindow = nil
-        recentActivity = []
-        transport?.setFocusedThread(id)
-        subscribeDetail(id)
+        replaceFocusedThread(with: id)
         recomputePresentation(userInitiated: true)
     }
 
@@ -665,27 +656,62 @@ final class AgentStore {
             && !attentionKeys.isEmpty
         previousAttentionKeys = attentionKeys
 
-        if focusedThreadId == nil || !(threads.contains { $0.id == focusedThreadId }) {
-            focusedThreadId = activeThreads.first?.id ?? threads.first?.id
-        }
-
-        if let focusedThreadId {
-            transport?.setFocusedThread(focusedThreadId)
-            // Snapshots land every 800ms while an agent works; subscribing is
-            // idempotent so the detail stream survives them.
-            subscribeDetail(focusedThreadId)
-        }
+        let activeIds = activeThreads.map(\.id)
+        let preferredFocus = preferredFocusedThreadId(
+            current: focusedThreadId,
+            activeThreadIds: activeIds
+        )
+        replaceFocusedThread(with: preferredFocus)
 
         recomputePresentation(forceAttention: newAttention)
 
         if newAttention {
             playAttentionSound()
             if let first = attentionThreads.first {
-                focusedThreadId = first.id
-                transport?.setFocusedThread(first.id)
-                subscribeDetail(first.id)
+                replaceFocusedThread(with: first.id)
             }
         }
+    }
+
+    /// Switches the card and its detail stream as one operation. Shell snapshots
+    /// can leave completed threads in history with no awareness phase; retaining
+    /// one as the focused card made the notch say Idle while another agent ran.
+    private func replaceFocusedThread(with threadId: String?) {
+        guard let threadId else {
+            focusedThreadId = nil
+            transport?.setFocusedThread(nil)
+            detailTask?.cancel()
+            detailTask = nil
+            subscribedThreadId = nil
+            clearFocusedDetail()
+            return
+        }
+
+        guard threadId != focusedThreadId else {
+            transport?.setFocusedThread(threadId)
+            // Snapshots land every 800ms while an agent works; subscribing is
+            // idempotent so the detail stream survives them.
+            subscribeDetail(threadId)
+            return
+        }
+
+        focusedThreadId = threadId
+        // Detail arrives a poll later; drop the old thread's data so the card
+        // never shows another agent's questions, plan, activity, or context.
+        clearFocusedDetail()
+
+        transport?.setFocusedThread(threadId)
+        subscribeDetail(threadId)
+    }
+
+    private func clearFocusedDetail() {
+        threadDetail = nil
+        pendingApprovals = []
+        pendingUserInputs = []
+        plan = nil
+        taskCompletionTicks = [:]
+        contextWindow = nil
+        recentActivity = []
     }
 
     /// Follows one thread's detail stream. Asking for the thread already being
@@ -824,7 +850,7 @@ final class AgentStore {
 
     private func applyDetail(_ snapshot: ThreadDetailSnapshot) async {
         guard !isDemoRunning else { return }
-        guard snapshot.thread.id == focusedThreadId || focusedThreadId == nil else { return }
+        guard snapshot.thread.id == focusedThreadId else { return }
         threadDetail = snapshot.thread
         let activities = snapshot.thread.activities
         pendingApprovals = derivePendingApprovals(from: activities)

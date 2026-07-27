@@ -170,6 +170,41 @@ struct DerivationTests {
         #expect(resolveThreadAwarenessPhase(thread) == .completed)
     }
 
+    @Test func stoppedSessionWithoutLatestTurnIsDone() {
+        let thread = ThreadShell(
+            id: "stopped",
+            projectId: "p",
+            title: "Finished work",
+            modelSelection: ModelSelection(model: "m"),
+            updatedAt: "2026-07-27T15:33:31.475Z",
+            settledAt: "2026-07-27T15:33:31.475Z",
+            session: Session(status: "stopped")
+        )
+
+        #expect(resolveThreadAwarenessPhase(thread) == .completed)
+    }
+
+    @Test func focusLeavesHistoricalThreadForRunningWork() {
+        #expect(
+            preferredFocusedThreadId(
+                current: "historical-stopped-thread",
+                activeThreadIds: ["currently-running-thread", "waiting-thread"]
+            ) == "currently-running-thread"
+        )
+        #expect(
+            preferredFocusedThreadId(
+                current: "waiting-thread",
+                activeThreadIds: ["currently-running-thread", "waiting-thread"]
+            ) == "waiting-thread"
+        )
+        #expect(
+            preferredFocusedThreadId(
+                current: "historical-stopped-thread",
+                activeThreadIds: []
+            ) == nil
+        )
+    }
+
     @Test func resolvesApprovalWhenActivityResolved() {
         let activities = [
             ThreadActivity(

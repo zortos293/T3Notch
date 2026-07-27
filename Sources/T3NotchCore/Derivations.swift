@@ -38,10 +38,25 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     if thread.latestTurn?.state == "interrupted", thread.latestTurn?.completedAt != nil {
         return .completed
     }
-    if thread.session?.status == "ready" || thread.session?.status == "idle" {
+    if thread.session?.status == "ready"
+        || thread.session?.status == "idle"
+        || thread.session?.status == "stopped"
+    {
         return .completed
     }
     return nil
+}
+
+/// Keep the current card only while it remains active. Otherwise move to the
+/// highest-priority active card, or clear focus when no work remains.
+public func preferredFocusedThreadId(
+    current: String?,
+    activeThreadIds: [String]
+) -> String? {
+    if let current, activeThreadIds.contains(current) {
+        return current
+    }
+    return activeThreadIds.first
 }
 
 public func headline(for phase: AgentAwarenessPhase) -> String {
