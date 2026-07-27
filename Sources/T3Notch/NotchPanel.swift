@@ -60,7 +60,11 @@ final class NotchPanelController: NSObject {
         let notch = NotchGeometry.notchRect(on: screen).insetBy(dx: -30, dy: -6)
         let overNotch = notch.contains(mouse)
 
-        let expanded = store.presentation == .expanded || store.presentation == .attention
+        // Onboarding is drawn as an expanded panel regardless of presentation.
+        // Keep its controls interactive too, especially the manual token field.
+        let expanded = store.needsOnboarding
+            || store.presentation == .expanded
+            || store.presentation == .attention
         let overPanel = expanded && panel.interactiveFrame.contains(mouse)
 
         let hovering = overNotch || overPanel
@@ -154,7 +158,9 @@ final class NotchPanel: NSPanel {
     /// the empty part an invisible click trap over whatever sits under the notch —
     /// the quick start window, for one, whose buttons could not be pressed.
     func syncInteractivity(pointer: CGPoint = NSEvent.mouseLocation) {
-        let expanded = store.presentation == .expanded || store.presentation == .attention
+        let expanded = store.needsOnboarding
+            || store.presentation == .expanded
+            || store.presentation == .attention
         // Collapsed states must not swallow menu bar clicks either.
         let ignores = !(expanded && interactiveFrame.contains(pointer))
         // This runs on every mouse move, so don't poke the window needlessly.
