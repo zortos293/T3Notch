@@ -1,7 +1,8 @@
 name: Release
 
-# Started by hand from the Actions tab: give it a version, it builds the app on a
-# real macOS 26 runner and publishes the release the in-app updater reads.
+# Started by hand from the Actions tab: give it a version, it builds, signs,
+# notarizes and staples the app on a real macOS 26 runner, then publishes the
+# release the in-app updater reads.
 on:
   workflow_dispatch:
     inputs:
@@ -74,13 +75,64 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Import the Developer ID certificate
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          : "${DEVELOPER_ID_P12_BASE64:?Missing DEVELOPER_ID_P12_BASE64 secret}"
+          : "${DEVELOPER_ID_P12_PASSWORD:?Missing DEVELOPER_ID_P12_PASSWORD secret}"
+
+          keychain="$RUNNER_TEMP/t3notch-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          certificate="$RUNNER_TEMP/developer-id.p12"
+
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -k "$keychain" \
+            -P "$DEVELOPER_ID_P12_PASSWORD" -A -t cert -f pkcs12
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk '/Developer ID Application/ { print $2; exit }')
+          [[ -n "$identity" ]] || {
+            echo "::error::No Developer ID Application identity was imported"
+            exit 1
+          }
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Configure Apple notarization
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          : "${APP_STORE_CONNECT_API_KEY:?Missing APP_STORE_CONNECT_API_KEY secret}"
+          : "${APP_STORE_CONNECT_KEY_ID:?Missing APP_STORE_CONNECT_KEY_ID secret}"
+          : "${APP_STORE_CONNECT_ISSUER_ID:?Missing APP_STORE_CONNECT_ISSUER_ID secret}"
+
+          api_key="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY" > "$api_key"
+          chmod 600 "$api_key"
+          xcrun notarytool store-credentials t3notch-ci-notary \
+            --key "$api_key" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER_ID"
+          echo "NOTARYTOOL_PROFILE=t3notch-ci-notary" >> "$GITHUB_ENV"
+
       - name: Test
         run: swift test
 
-      - name: Build the app bundle
+      - name: Build and sign the app bundle
         run: Scripts/bundle.sh release
 
-      - name: Check the bundle carries the version it was asked for
+      - name: Check the version and Developer ID signature
         run: |
           # The updater refuses a download whose Info.plist disagrees with the
           # release tag, so a mismatch here would ship an update nobody can install.
@@ -88,16 +140,30 @@ jobs:
           built=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$plist")
           [[ "$built" == "$VERSION" ]] || { echo "::error::bundle says $built"; exit 1; }
           codesign --verify --deep --strict dist/T3Notch.app
+          signature=$(codesign -dvvv dist/T3Notch.app 2>&1)
+          grep -q '^Authority=Developer ID Application:' <<< "$signature"
+          grep -q '^Runtime Version=' <<< "$signature"
           echo "$built ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist"))"
 
-      - name: Package
+      - name: Notarize, staple and package
         id: package
         run: |
-          # ditto, so the ad-hoc signature and the bundle's symlinks survive the zip.
+          Scripts/notarize.sh
           zip="dist/T3Notch-${VERSION}-arm64.zip"
-          ditto -c -k --keepParent dist/T3Notch.app "$zip"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
           echo "sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Test the quarantined download
+        env:
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          extracted="$RUNNER_TEMP/quarantine-test"
+          ditto -x -k "$ZIP" "$extracted"
+          xattr -w com.apple.quarantine \
+            "0081;00000000;GitHub_Actions;T3Notch" "$extracted/T3Notch.app"
+          codesign --verify --deep --strict "$extracted/T3Notch.app"
+          xcrun stapler validate "$extracted/T3Notch.app"
+          spctl --assess --type execute --verbose=2 "$extracted/T3Notch.app"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -116,12 +182,8 @@ jobs:
           ## Install
 
           Download \`$(basename "$ZIP")\`, unzip it, and drag **T3Notch.app** to \`/Applications\`.
-          The build is ad-hoc signed rather than notarized, so the first launch needs
-          right-click → **Open** → **Open**, or:
-
-          \`\`\`bash
-          xattr -d com.apple.quarantine /Applications/T3Notch.app
-          \`\`\`
+          This release is Developer ID signed and notarized by Apple. Open it normally—no
+          quarantine workaround, \`xattr\` command, or right-click Open flow is required.
 
           Already running T3Notch 1.1.0 or later? It will offer this update by itself,
           or you can ask now from the menu bar icon → **Check for Updates…**.
@@ -141,3 +203,8 @@ jobs:
           gh release create "$TAG" "$ZIP" "${flags[@]}"
           echo "Released $TAG" >> "$GITHUB_STEP_SUMMARY"
           gh release view "$TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up the signing keychain
+        if: ${{ always() }}
+        run: |
+          security delete-keychain "$RUNNER_TEMP/t3notch-signing.keychain-db" || true

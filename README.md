@@ -333,8 +333,15 @@ same silhouette at 20×11 as a template image.
 
 **Actions → Release → Run workflow**, on a macOS 26 runner with the same Xcode 26.6
 the app is built with locally. Give it a version (`1.1.0`, or `1.1.0-beta.1` on the
-prerelease channel) and it tests, builds, checks that the bundle really carries that
-version, packages with `ditto`, and publishes the tag with the zip and its checksum.
+prerelease channel) and it tests, builds, Developer ID signs, notarizes, staples,
+checks the quarantined download with Gatekeeper, and publishes the tag with the zip
+and its checksum.
+
+The workflow reads the signing identity and App Store Connect API key from encrypted
+GitHub Actions secrets. Their values never belong in the repository:
+`DEVELOPER_ID_P12_BASE64`, `DEVELOPER_ID_P12_PASSWORD`,
+`APP_STORE_CONNECT_API_KEY`, `APP_STORE_CONNECT_KEY_ID`, and
+`APP_STORE_CONNECT_ISSUER_ID`.
 
 Turn **publish** off for a dry run: the same build lands as a workflow artifact and
 no tag is created. The version and the tag are checked before anything is built, so
