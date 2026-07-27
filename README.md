@@ -76,15 +76,24 @@ for a few seconds — because these moments arrive exactly when nobody is hoveri
 
 ### First launch
 
-The first run explains the three things worth knowing and tests the connection for
-real: every step makes the request it describes, and failures print what came back
-along with the command to fix it.
+The first run is a short tour, and the notch performs it rather than being described
+in the abstract. A pretend agent moves in above the window and works through a plan
+while you read, so every claim on screen is visible a few centimetres higher.
 
 ![The first-launch quick start](docs/quickstart.png)
 
-While it is open the notch takes part rather than being described in the abstract:
-it holds a **Quick start** pill, opens showing whichever step you point at, and
-echoes the connection test as it runs.
+It then asks a question, in the notch, and waits — answering it there is how the
+tour advances, and a second question slides in behind the first to show the queue.
+Its plan finishes on the last page, banner and all.
+
+The tour ends on a connection test that is not a mock: every step makes the request
+it describes, and failures print what came back along with the command to fix it.
+
+![The connection test at the end of the tour](docs/quickstart-check.png)
+
+Nothing in the walkthrough touches your real agents — polling is suspended for as
+long as the window is open, and the pretend agent is discarded when it closes. You
+can replay it any time from **Settings → Quick start**.
 
 ## Install
 
@@ -103,7 +112,9 @@ app bundle — pin `DEVELOPER_DIR` as above.
 For a token, T3Notch tries the Keychain, then `t3 auth session issue --token-only`,
 then `npx -y t3@latest auth session issue --token-only`. If all three fail you can
 paste a bearer token into the panel. Tokens live in the Keychain under
-`gg.t3tools.t3notch`.
+`gg.t3tools.t3notch`, and a saved one is dropped unread when the build that wrote it
+is not the build reading it — otherwise every update would open the Keychain's
+password prompt, which costs more than minting a fresh token does.
 
 ## Settings
 

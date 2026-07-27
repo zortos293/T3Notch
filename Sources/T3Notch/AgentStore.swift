@@ -155,6 +155,107 @@ final class AgentStore {
         applyWalkthrough(walkthrough)
     }
 
+    func stage(_ stage: Walkthrough.Stage) {
+        updateWalkthrough(Walkthrough(stage: stage))
+    }
+
+    // MARK: - Demo
+
+    /// While a demo is running the poller's snapshots are dropped on the floor,
+    /// so a real agent cannot walk into the middle of the welcome tour, and the
+    /// panel keeps showing the pretend one until the window is done with it.
+    private(set) var isDemoRunning = false
+    private var demoAnswerHandler: (() -> Void)?
+
+    func beginDemo(onAnswer: @escaping () -> Void) {
+        guard !isDemoRunning else { return }
+        isDemoRunning = true
+        demoAnswerHandler = onAnswer
+        // Real agents step aside rather than share the panel with a fake one.
+        threads = []
+        projects = []
+        pendingApprovals = []
+        pendingUserInputs = []
+        plan = nil
+        recentActivity = []
+        contextWindow = nil
+        focusedThreadId = nil
+    }
+
+    /// Clears the pretend world. The next snapshot, at most a second away, puts
+    /// the real one back.
+    func endDemo() {
+        guard isDemoRunning else { return }
+        isDemoRunning = false
+        demoAnswerHandler = nil
+        dismissCelebration()
+        threads = []
+        projects = []
+        pendingApprovals = []
+        pendingUserInputs = []
+        plan = nil
+        recentActivity = []
+        contextWindow = nil
+        taskCompletionTicks = [:]
+        focusedThreadId = nil
+        recomputePresentation(userInitiated: false)
+    }
+
+    func demoWorld(
+        projects: [ProjectShell],
+        threads: [ThreadShell],
+        plan: ActivePlanState?,
+        context: ContextWindowSnapshot?
+    ) {
+        guard isDemoRunning else { return }
+        self.projects = projects
+        self.threads = threads
+        self.plan = plan
+        contextWindow = context
+        focusedThreadId = threads.first?.id
+        recomputePresentation(userInitiated: false)
+    }
+
+    func demoActivity(_ events: [ActivityEvent]) {
+        guard isDemoRunning else { return }
+        recentActivity = events
+    }
+
+    /// Bumping the tick is what makes the finished row animate, the same way a
+    /// real plan update does through `noteFinishedTasks`.
+    func demoPlan(_ plan: ActivePlanState, finishedStep: String?) {
+        guard isDemoRunning else { return }
+        self.plan = plan
+        if let finishedStep {
+            taskCompletionTicks[finishedStep, default: 0] += 1
+        }
+    }
+
+    /// Puts the pretend thread back to work once its question is answered.
+    private func finishDemoPrompt() {
+        threads = threads.map { thread in
+            var thread = thread
+            thread.hasPendingUserInput = false
+            thread.hasPendingApprovals = false
+            return thread
+        }
+        recomputePresentation(userInitiated: true)
+        demoAnswerHandler?()
+    }
+
+    func demoPrompt(_ input: PendingUserInput?, on threadId: String) {
+        guard isDemoRunning else { return }
+        pendingUserInputs = input.map { [$0] } ?? []
+        answeredRequestIds = []
+        threads = threads.map { thread in
+            guard thread.id == threadId else { return thread }
+            var thread = thread
+            thread.hasPendingUserInput = input != nil
+            return thread
+        }
+        recomputePresentation(forceAttention: input != nil)
+    }
+
     private func applyWalkthrough(_ walkthrough: Walkthrough?) {
         guard self.walkthrough != walkthrough else { return }
         self.walkthrough = walkthrough
@@ -458,6 +559,11 @@ final class AgentStore {
 
     func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) {
         guard let threadId = focusedThread?.id else { return }
+        if isDemoRunning {
+            pendingApprovals.removeAll { $0.requestId == approval.requestId }
+            finishDemoPrompt()
+            return
+        }
         answeredRequestIds.insert(approval.requestId)
         pendingApprovals.removeAll { $0.requestId == approval.requestId }
         let command = DispatchCommand.approvalRespond(
@@ -474,6 +580,11 @@ final class AgentStore {
 
     func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) {
         guard let threadId = focusedThread?.id else { return }
+        if isDemoRunning {
+            pendingUserInputs.removeAll { $0.requestId == input.requestId }
+            finishDemoPrompt()
+            return
+        }
         answeredRequestIds.insert(input.requestId)
         pendingUserInputs.removeAll { $0.requestId == input.requestId }
         let command = DispatchCommand.userInputRespond(
@@ -504,6 +615,8 @@ final class AgentStore {
     // MARK: - Private
 
     private func applyShell(_ snapshot: ShellSnapshot) async {
+        // The welcome tour owns the panel while it runs.
+        guard !isDemoRunning else { return }
         projects = snapshot.projects
         threads = snapshot.threads.filter { $0.archivedAt == nil }
 
@@ -684,6 +797,7 @@ final class AgentStore {
     }
 
     private func applyDetail(_ snapshot: ThreadDetailSnapshot) async {
+        guard !isDemoRunning else { return }
         guard snapshot.thread.id == focusedThreadId || focusedThreadId == nil else { return }
         threadDetail = snapshot.thread
         let activities = snapshot.thread.activities
@@ -797,7 +911,7 @@ final class AgentStore {
         transport?.setExpanded(false)
     }
 
-    private func playAttentionSound() {
+    func playAttentionSound() {
         guard settings.values.soundOnAttention else { return }
         if attentionSound == nil {
             attentionSound = NSSound(named: "Tink")

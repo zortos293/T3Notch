@@ -10,6 +10,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let store: AgentStore
     private let settings: SettingsStore
     private let updater: Updater
+    /// The welcome's pretend agent. Owned here rather than by the view, so a
+    /// window closed mid-tour still hands the notch back.
+    private lazy var demo = DemoAgent(store: store)
     private var window: NSWindow?
     /// Quick start replaces the settings list until it is dismissed.
     private var showingQuickStart = false
@@ -55,8 +58,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     private func makeWindow() -> NSWindow {
+        let size = CGSize(
+            width: showingQuickStart ? 560 : 470,
+            height: showingQuickStart ? 480 : 640
+        )
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 470, height: showingQuickStart ? 660 : 640),
+            contentRect: CGRect(origin: .zero, size: size),
             // Full-size content with a hidden title: the traffic lights float over
             // the app's own header instead of sitting in a grey bar.
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -71,15 +78,22 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.backgroundColor = NSColor(red: 0.055, green: 0.06, blue: 0.075, alpha: 1)
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentMinSize = CGSize(width: 430, height: 420)
+        window.contentMinSize = size
 
-        window.contentView = NSHostingView(rootView: rootView)
+        let hosted = NSHostingView(rootView: rootView)
+        // Left to itself, NSHostingView reports SwiftUI's fitting size to the
+        // window and the window grows to match — which turned the welcome into a
+        // screen-height column. The window decides the size here; the view fills it.
+        hosted.sizingOptions = []
+        hosted.frame = CGRect(origin: .zero, size: size)
+        window.contentView = hosted
+        window.setContentSize(size)
         return window
     }
 
     @ViewBuilder private var rootView: some View {
         if showingQuickStart {
-            QuickStartView(store: store) { [weak self] in
+            QuickStartView(store: store, demo: demo) { [weak self] in
                 self?.finishQuickStart()
             }
         } else {
@@ -93,7 +107,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// expanded notch, and the walkthrough is meant to be read while watching it.
     private func sitClearOfTheNotch(_ window: NSWindow) {
         guard let screen = window.screen ?? NSScreen.main else { return }
-        let clearance: CGFloat = 300
+        // Deep enough for the tallest thing the walkthrough puts in the notch: a
+        // pretend agent with its activity and plan, plus a question above them.
+        let clearance: CGFloat = 580
         var frame = window.frame
         let highestTop = screen.frame.maxY - clearance
         frame.origin.y = min(frame.origin.y, highestTop - frame.height)
@@ -121,6 +137,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         // The hosted view's `onDisappear` is not guaranteed for a window that is
         // only closed rather than released, and a notch stuck in walkthrough mode
         // would never hide again.
+        demo.stop()
         store.endWalkthrough()
         // Give focus back rather than leaving an iconless app activated.
         NSApp.setActivationPolicy(.accessory)

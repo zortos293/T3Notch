@@ -140,18 +140,17 @@ private struct ExpandedBody: View {
         VStack(alignment: .leading, spacing: 10) {
             if store.needsOnboarding {
                 OnboardingView(store: store)
-            } else if let walkthrough = store.walkthrough,
-                walkthrough.wantsPanel,
-                store.activeThreads.isEmpty
-            {
-                // Nothing is running, so the quick start is all the panel has to say.
-                WalkthroughCard(walkthrough: walkthrough)
+            } else if let caption = store.walkthrough?.caption, store.activeThreads.isEmpty {
+                // Nothing to demonstrate on, so the caption is all the panel has
+                // to say — during the connection test, for instance.
+                WalkthroughBanner(caption: caption)
                 Text("No agents running yet.")
                     .font(.system(size: 10, design: .rounded))
                     .foregroundStyle(.white.opacity(0.35))
             } else {
-                if let walkthrough = store.walkthrough, walkthrough.wantsPanel {
-                    WalkthroughCard(walkthrough: walkthrough)
+                if let caption = store.walkthrough?.caption {
+                    WalkthroughBanner(caption: caption)
+                        .transition(.push(from: .top).combined(with: .opacity))
                 }
 
                 if let celebration = store.celebration {
@@ -508,30 +507,31 @@ private struct ReviewBar: View {
     }
 }
 
-/// The notch's half of the quick start: whichever step is being pointed at in the
-/// window, or how its connection test is going.
-private struct WalkthroughCard: View {
-    let walkthrough: Walkthrough
+/// The notch's half of the welcome: what the pretend agent is up to, or how the
+/// connection test is going. Deliberately loud about being a demonstration.
+private struct WalkthroughBanner: View {
+    let caption: Walkthrough.Caption
 
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Image(systemName: symbol)
+            Image(systemName: caption.symbol)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
+                .foregroundStyle(caption.tint)
                 .frame(width: 16)
+                .contentTransition(.symbolEffect(.replace))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(caption.title)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.92))
-                Text(detail)
+                Text(caption.detail)
                     .font(.system(size: 10, design: .rounded))
                     .foregroundStyle(.white.opacity(0.55))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
 
-            if walkthrough.status == .testing {
+            if caption.isBusy {
                 WorkingPulse()
                     .frame(width: 6, height: 6)
                     .padding(.top, 3)
@@ -540,52 +540,13 @@ private struct WalkthroughCard: View {
         .padding(9)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(tint.opacity(0.1))
+                .fill(caption.tint.opacity(0.1))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(tint.opacity(0.28), lineWidth: 1)
+                .stroke(caption.tint.opacity(0.28), lineWidth: 1)
         )
-    }
-
-    // A pointed-at step wins over the test result, since it is the more recent
-    // thing the reader did.
-    private var title: String {
-        if let step = walkthrough.step { return step.title }
-        switch walkthrough.status {
-        case .idle: return "Quick start"
-        case .testing: return "Testing the connection"
-        case .passed: return "Connected to T3 Code"
-        case .failed: return "Cannot reach T3 Code"
-        }
-    }
-
-    private var detail: String {
-        if let step = walkthrough.step { return step.hint }
-        switch walkthrough.status {
-        case .idle: return "Follow along in the window."
-        case .testing: return "Asking the local server who is running."
-        case let .passed(summary): return summary
-        case let .failed(message): return message
-        }
-    }
-
-    private var symbol: String {
-        if let step = walkthrough.step { return step.symbol }
-        switch walkthrough.status {
-        case .idle, .testing: return "sparkles"
-        case .passed: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.triangle.fill"
-        }
-    }
-
-    private var tint: Color {
-        if walkthrough.step != nil { return .cyan }
-        switch walkthrough.status {
-        case .idle, .testing: return .cyan
-        case .passed: return .green
-        case .failed: return .orange
-        }
+        .animation(notchSpring, value: caption)
     }
 }
 
@@ -667,7 +628,7 @@ private struct StreamingCaret: View {
 }
 
 /// Soft breathing dot shown while a turn is actively running.
-private struct WorkingPulse: View {
+struct WorkingPulse: View {
     @State private var on = false
 
     var body: some View {
