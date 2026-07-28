@@ -1,0 +1,16 @@
+{
+  "pid": 4242,
+  "sessionId": "sess-abc",
+  "cwd": "/Users/dev/project",
+  "startedAt": 1785250793073,
+  "procStart": "Tue Jul 28 14:59:52 2026",
+  "version": "2.1.220",
+  "peerProtocol": 1,
+  "kind": "interactive",
+  "entrypoint": "cli",
+  "name": "project",
+  "nameSource": "derived",
+  "status": "busy",
+  "updatedAt": 1785252345885,
+  "statusUpdatedAt": 1785252345885
+}

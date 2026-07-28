@@ -1,23 +1,6 @@
 import Foundation
 import os
 
-public protocol T3Transport: AnyObject, Sendable {
-    var shell: AsyncStream<ShellSnapshot> { get }
-    func threadDetail(_ id: String) -> AsyncStream<ThreadDetailSnapshot>
-    func dispatch(_ command: DispatchCommand) async throws
-    func requestImmediatePoll()
-    func setFocusedThread(_ id: String?)
-    func setExpanded(_ expanded: Bool)
-    func stop()
-}
-
-public enum ConnectionState: String, Sendable, Equatable {
-    case connecting
-    case connected
-    case disconnected
-    case unauthorized
-}
-
 public struct PollingConfiguration: Sendable {
     public var activeShellNanoseconds: UInt64
     public var idleShellNanoseconds: UInt64
@@ -60,7 +43,7 @@ public struct PollingConfiguration: Sendable {
 }
 
 /// Adaptive HTTP polling transport over t3code's public orchestration API.
-public final class PollingTransport: T3Transport, @unchecked Sendable {
+public final class PollingTransport: AgentTransport, @unchecked Sendable {
     private struct State {
         var lastShellSequence: Int?
         var focusedThreadId: String?

@@ -538,7 +538,7 @@ private struct ReviewBar: View {
 
             Spacer(minLength: 4)
 
-            Button("Open in T3 Code") { store.openInT3Code(thread) }
+            Button(store.openLabel(for: thread)) { store.openThread(thread) }
                 .buttonStyle(.plain)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .padding(.horizontal, 9)
@@ -1215,7 +1215,7 @@ private struct OnboardingView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Connect to T3 Code")
+            Text("Connect T3 Code (optional)")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
             Text(store.onboardingMessage ?? "Paste a bearer token to connect.")
@@ -1247,6 +1247,15 @@ private struct OnboardingView: View {
                 .foregroundStyle(.white.opacity(0.85))
                 .background(Capsule().fill(Color.white.opacity(0.12)))
             }
+
+            // T3 Code is one source of three, so the panel must have a way out
+            // that is not a token.
+            Button("Skip — watch Claude Code and Codex only") {
+                store.stopWatchingT3()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(.white.opacity(0.55))
         }
     }
 }

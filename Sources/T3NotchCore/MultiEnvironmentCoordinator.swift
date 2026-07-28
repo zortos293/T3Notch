@@ -12,12 +12,12 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         }
 
         private let data: OSAllocatedUnfairLock<Data>
-        let transport: PollingTransport
+        let transport: any AgentTransport
 
         init(
             profile: EnvironmentProfile,
             descriptor: EnvironmentDescriptor?,
-            transport: PollingTransport
+            transport: any AgentTransport
         ) {
             data = OSAllocatedUnfairLock(initialState: Data(
                 profile: profile,
@@ -103,10 +103,23 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         authorizer: any HTTPAuthorizer
     ) {
         let client = T3HTTPClient(endpoint: endpoint, authorizer: authorizer)
-        let transport = PollingTransport(
-            client: client,
-            configuration: profile.source == .local ? PollingConfiguration() : .remote
+        register(
+            profile: profile,
+            descriptor: descriptor,
+            transport: PollingTransport(
+                client: client,
+                configuration: profile.source == .local ? PollingConfiguration() : .remote
+            )
         )
+    }
+
+    /// Registers a transport the caller already built. The local machine uses
+    /// this to hand over an aggregate of T3 plus the agent CLIs watched on disk.
+    public func register(
+        profile: EnvironmentProfile,
+        descriptor: EnvironmentDescriptor?,
+        transport: any AgentTransport
+    ) {
         let session = Session(
             profile: profile,
             descriptor: descriptor,
@@ -124,7 +137,9 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
             session.updateState(environmentState)
             self.emit(session)
         }
-        transport.onRepeatedFailure = { [weak self, weak session] in
+        // Path failover only applies to directly polled remotes, which are the
+        // only transports that report repeated failures.
+        (transport as? PollingTransport)?.onRepeatedFailure = { [weak self, weak session] in
             guard let self, let session else { return }
             self.emit(session)
         }
@@ -162,7 +177,7 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     }
 
     public func setFocusedThread(_ focused: ScopedThreadID?) {
-        let detailSource: (PollingTransport, ScopedThreadID, Int)? = state.withLock { state in
+        let detailSource: (any AgentTransport, ScopedThreadID, Int)? = state.withLock { state in
             state.detailTask?.cancel()
             state.detailTask = nil
             state.detailGeneration &+= 1
@@ -178,8 +193,13 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
             return (session.transport, focused, state.detailGeneration)
         }
         guard let (transport, focused, generation) = detailSource else { return }
+        // Subscribing here rather than inside the task keeps the replacement in
+        // call order: `threadDetail` ends whatever stream that id already had,
+        // so two tasks racing could leave the newer subscription torn down and
+        // the older one abandoned as cancelled.
+        let stream = transport.threadDetail(focused.threadID)
         let task = Task { [weak self] in
-            for await detail in transport.threadDetail(focused.threadID) {
+            for await detail in stream {
                 self?.continuation.yield(.detail(focused, detail))
             }
         }
@@ -286,7 +306,10 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
     }
 
     private func emit(_ session: Session) {
-        continuation.yield(.snapshot(makeSnapshot(session)))
+        let snapshot = makeSnapshot(session)
+        Logger(subsystem: "gg.t3tools.t3notch", category: "trace")
+            .debug("coordinator: emit \(snapshot.profile.environmentID.rawValue, privacy: .public) shellThreads=\(snapshot.shell?.threads.count ?? -1)")
+        continuation.yield(.snapshot(snapshot))
     }
 
     private func makeSnapshot(_ session: Session) -> EnvironmentSnapshot {

@@ -1,0 +1,74 @@
+{
+  "env": {
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"
+  },
+  "enabledPlugins": {
+    "codex@marketplace": true
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  },
+  "permissions": {
+    "allow": ["Bash(git status:*)"],
+    "deny": []
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "~/.jv-hook/bin/jv-hook session-start" },
+          { "type": "command", "command": "~/.vibe-island/bridge.sh SessionStart" }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.jv-hook/bin/jv-hook prompt" }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "~/.jv-hook/bin/jv-hook pre-tool" }]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "~/.vibe-island/bridge.sh PreToolUse" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "~/.jv-hook/bin/jv-hook post-tool", "timeout": 10 }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.vibe-island/bridge.sh Notification" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.jv-hook/bin/jv-hook stop" }]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.jv-hook/bin/jv-hook subagent-stop" }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.vibe-island/bridge.sh SessionEnd" }]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [{ "type": "command", "command": "~/.jv-hook/bin/jv-hook pre-compact" }]
+      }
+    ]
+  }
+}

@@ -21,6 +21,8 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 header
 
+                AgentSourcesCard(store: store, settings: settings)
+
                 SettingsCard("Attention") {
                     SettingsToggle(
                         "Open on questions",
@@ -268,6 +270,249 @@ struct SettingsView: View {
             )
         }
         .ignoresSafeArea()
+    }
+}
+
+/// Which agent runtimes the notch watches, what each of them is doing right
+/// now, and the Claude Code hooks that make its permission prompts answerable
+/// from up there.
+private struct AgentSourcesCard: View {
+    let store: AgentStore
+    @Bindable var settings: SettingsStore
+
+    @State private var hookStatus: ClaudeHookStatus = .notInstalled
+    @State private var portText = ""
+    @State private var showsTokenSheet = false
+    @FocusState private var portFocused: Bool
+
+    var body: some View {
+        SettingsCard("Agent sources") {
+            SettingsToggle(
+                "Watch T3 Code",
+                detail: detail(for: .t3),
+                isOn: settings.binding(\.watchT3),
+                detailIsProblem: isProblem(.t3)
+            )
+            if settings.values.watchT3, store.sourceProblems[.t3] != nil {
+                SettingsDivider()
+                SettingsRow("T3 Code token", detail: "Paste a fresh session token.") {
+                    PillButton("Fix…") { showsTokenSheet = true }
+                }
+            }
+            SettingsDivider()
+            SettingsToggle(
+                "Watch Claude Code",
+                detail: detail(for: .claude),
+                isOn: settings.binding(\.watchClaude),
+                detailIsProblem: isProblem(.claude)
+            )
+            SettingsDivider()
+            SettingsToggle(
+                "Watch Codex",
+                detail: detail(for: .codex),
+                isOn: settings.binding(\.watchCodex),
+                detailIsProblem: isProblem(.codex)
+            )
+
+            SettingsDivider()
+            SettingsRow(
+                "Claude Code hooks",
+                detail: hookDetail,
+                detailIsProblem: hookDetailIsProblem
+            ) {
+                HStack(spacing: 6) {
+                    PillButton(installLabel) {
+                        store.installClaudeHooks()
+                        hookStatus = store.claudeHookStatus()
+                    }
+                    if hookStatus != .notInstalled {
+                        PillButton("Remove") {
+                            store.removeClaudeHooks()
+                            hookStatus = store.claudeHookStatus()
+                        }
+                    }
+                }
+            }
+            .disabled(!settings.values.watchClaude)
+
+            SettingsDivider()
+            SettingsToggle(
+                "Answer permission prompts in the notch",
+                detail: listenerDetail,
+                isOn: settings.binding(\.claudeHookListener),
+                detailIsProblem: store.claudeHookProblem != nil
+            )
+            .disabled(!settings.values.watchClaude)
+
+            SettingsDivider()
+            SettingsRow(
+                "Hook port",
+                detail: "Reinstall the hooks after changing this — they carry the port."
+            ) {
+                TextField("", text: $portText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 72)
+                    .focused($portFocused)
+                    .onSubmit { commitPort() }
+                    // Clicking away is as much a commit as pressing return, and
+                    // an uncommitted port would not match the installed hooks.
+                    .onChange(of: portFocused) { _, focused in
+                        if !focused { commitPort() }
+                    }
+                    .accessibilityLabel("Claude Code hook port")
+            }
+            .disabled(!settings.values.watchClaude)
+        }
+        .onAppear {
+            hookStatus = store.claudeHookStatus()
+            portText = String(settings.values.claudeHookPort)
+        }
+        .sheet(isPresented: $showsTokenSheet) {
+            T3TokenSheet(store: store)
+        }
+    }
+
+    // MARK: - Status lines
+
+    private func detail(for source: AgentSource) -> String {
+        guard isWatched(source) else { return "Not watched." }
+        if let problem = store.sourceProblems[source]?
+            .split(separator: "\n").first.map(String.init)
+        {
+            return problem
+        }
+        switch store.sourceStatuses[source] ?? .connecting {
+        case .connected:
+            let count = store.localSessionCount(for: source)
+            return count == 0
+                ? "Connected · nothing running right now"
+                : "Connected · \(count) \(count == 1 ? "session" : "sessions")"
+        case .connecting:
+            return "Connecting…"
+        case .disconnected:
+            return notRunningDetail(source)
+        case .unauthorized:
+            return "Not authorised — paste a token."
+        }
+    }
+
+    private func notRunningDetail(_ source: AgentSource) -> String {
+        switch source {
+        case .t3: "T3 Code is not running."
+        case .claude: "No ~/.claude sessions to read."
+        case .codex: "No ~/.codex sessions to read."
+        }
+    }
+
+    private func isWatched(_ source: AgentSource) -> Bool {
+        switch source {
+        case .t3: settings.values.watchT3
+        case .claude: settings.values.watchClaude
+        case .codex: settings.values.watchCodex
+        }
+    }
+
+    private func isProblem(_ source: AgentSource) -> Bool {
+        isWatched(source) && store.sourceProblems[source] != nil
+    }
+
+    private var installLabel: String {
+        hookStatus == .notInstalled ? "Install hooks" : "Reinstall"
+    }
+
+    private var hookDetail: String {
+        if let message = store.claudeHookMessage { return message }
+        switch hookStatus {
+        case let .installed(port):
+            return "Installed on port \(port). Running sessions pick them up right away."
+        case .notInstalled:
+            return "Not installed — approvals stay in the terminal. "
+                + "Installing only appends to ~/.claude/settings.json."
+        case let .partial(missing):
+            return missing.isEmpty
+                ? "Installed on more than one port. Install them again."
+                : "Missing \(missing.joined(separator: ", ")). Install them again."
+        case let .unreadable(reason):
+            return "Could not read ~/.claude/settings.json: \(reason)"
+        }
+    }
+
+    private var hookDetailIsProblem: Bool {
+        if store.claudeHookMessage != nil { return true }
+        switch hookStatus {
+        case .installed, .notInstalled: return false
+        case .partial, .unreadable: return true
+        }
+    }
+
+    private var listenerDetail: String {
+        if let problem = store.claudeHookProblem { return problem }
+        return "Listening on 127.0.0.1:\(settings.values.claudeHookPort)."
+    }
+
+    private func commitPort() {
+        guard let port = Int(portText.trimmingCharacters(in: .whitespaces)),
+              SettingsStore.portRange.contains(port)
+        else {
+            portText = String(settings.values.claudeHookPort)
+            return
+        }
+        settings.set(\.claudeHookPort, to: port)
+    }
+}
+
+/// The token form, for when T3 Code is the only source that is down and the
+/// notch's own onboarding panel therefore never appears.
+private struct T3TokenSheet: View {
+    let store: AgentStore
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var token = ""
+
+    private let tokenCommand = "npx -y t3@latest auth session issue --token-only"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect T3 Code")
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white)
+
+            Text(store.sourceProblems[.t3] ?? "Paste a bearer token to connect.")
+                .font(.system(size: 11.5, design: .rounded))
+                .foregroundStyle(.white.opacity(0.58))
+                .fixedSize(horizontal: false, vertical: true)
+
+            SecureField("Bearer token", text: $token)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+
+            HStack {
+                PillButton("Copy command") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(tokenCommand, forType: .string)
+                }
+                Spacer()
+                PillButton("Cancel") { dismiss() }
+                Button {
+                    store.submitManualToken(token)
+                    dismiss()
+                } label: {
+                    Text("Connect")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color(red: 0.21, green: 0.44, blue: 0.98)))
+                }
+                .buttonStyle(.plain)
+                .disabled(token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .background(Color(red: 0.055, green: 0.06, blue: 0.075))
+        .preferredColorScheme(.dark)
     }
 }
 

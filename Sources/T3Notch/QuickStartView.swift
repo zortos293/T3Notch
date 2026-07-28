@@ -192,15 +192,16 @@ struct QuickStartView: View {
             return switchedCards ? "Whichever one you pick" : "It is never just one agent"
         case .connection:
             if check.isRunning { return "Checking the connection" }
-            return check.failure == nil ? "Everything answered" : "T3 Code is not answering"
+            return check.failure == nil ? "Everything answered" : "No sources answering"
         }
     }
 
     private var subtitle: String {
         switch chapter {
         case .welcome:
-            return "T3Notch watches the agents running in T3 Code and puts them where you are "
-                + "already looking. Here is a minute-long tour, with a pretend agent."
+            return "T3Notch watches the agents running in T3 Code, Claude Code and Codex, and "
+                + "puts them where you are already looking. Here is a minute-long tour, with a "
+                + "pretend agent."
         case .working:
             return "The agent in your notch is not real, but everything it does up there is "
                 + "exactly what a real one shows."
@@ -220,12 +221,12 @@ struct QuickStartView: View {
                 : "Two more just moved in, one of them in another project. Every card is "
                     + "pressable, and the panel below follows the one you press."
         case .connection:
-            if check.isRunning { return "Making the real requests, one at a time." }
+            if check.isRunning { return "Checking each watched source, one step at a time." }
             if let failure = check.failure {
-                return "\(failure) failed. T3Notch will keep trying; start T3 Code and it "
-                    + "will connect by itself."
+                return "\(failure) failed. T3Notch will keep trying; start an agent and it "
+                    + "will pick it up by itself."
             }
-            return check.summary ?? "T3 Code is running and the notch can see it."
+            return check.summary ?? "At least one source is running and the notch can see it."
         }
     }
 
@@ -304,7 +305,7 @@ struct QuickStartView: View {
     }
 
     private func runCheck() {
-        Task { await check.run() }
+        Task { await check.run(sources: store.settingsValues) }
     }
 
     private func finish() {
@@ -585,6 +586,7 @@ private struct CheckRow: View {
         case .waiting: nil
         case .running: "checking…"
         case let .passed(message): message
+        case let .warned(message): message
         case let .failed(message): message
         }
     }
@@ -594,6 +596,7 @@ private struct CheckRow: View {
         case .waiting: .white.opacity(0.3)
         case .running: .cyan
         case .passed: .green
+        case .warned: .yellow
         case .failed: .orange
         }
     }
@@ -609,6 +612,10 @@ private struct CheckRow: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.green)
                 .transition(.scale.combined(with: .opacity))
+        case .warned:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.yellow)
         case .failed:
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.system(size: 13, weight: .semibold))

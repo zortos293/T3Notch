@@ -132,6 +132,9 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
     public var hasPendingApprovals: Bool
     public var hasPendingUserInput: Bool
     public var hasActionableProposedPlan: Bool?
+    /// Process that owns a locally observed session, so the app can activate the
+    /// terminal running it. Absent from T3 payloads.
+    public var ownerPid: Int?
 
     public init(
         id: String,
@@ -151,7 +154,8 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         latestUserMessageAt: String? = nil,
         hasPendingApprovals: Bool = false,
         hasPendingUserInput: Bool = false,
-        hasActionableProposedPlan: Bool? = nil
+        hasActionableProposedPlan: Bool? = nil,
+        ownerPid: Int? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -171,6 +175,7 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         self.hasPendingApprovals = hasPendingApprovals
         self.hasPendingUserInput = hasPendingUserInput
         self.hasActionableProposedPlan = hasActionableProposedPlan
+        self.ownerPid = ownerPid
     }
 }
 
@@ -428,6 +433,46 @@ public enum DispatchCommand: Encodable, Sendable {
             try container.encode(threadId, forKey: .threadId)
             try container.encodeIfPresent(turnId, forKey: .turnId)
             try container.encode(createdAt, forKey: .createdAt)
+        }
+    }
+}
+
+extension DispatchCommand {
+    /// Thread the command targets; the aggregator routes on it.
+    public var threadId: String {
+        switch self {
+        case let .approvalRespond(_, threadId, _, _, _): threadId
+        case let .userInputRespond(_, threadId, _, _, _): threadId
+        case let .turnInterrupt(_, threadId, _, _): threadId
+        }
+    }
+
+    /// Same command aimed at another thread id, used to strip/apply namespaces.
+    public func replacingThreadId(_ id: String) -> DispatchCommand {
+        switch self {
+        case let .approvalRespond(commandId, _, requestId, decision, createdAt):
+            .approvalRespond(
+                commandId: commandId,
+                threadId: id,
+                requestId: requestId,
+                decision: decision,
+                createdAt: createdAt
+            )
+        case let .userInputRespond(commandId, _, requestId, answers, createdAt):
+            .userInputRespond(
+                commandId: commandId,
+                threadId: id,
+                requestId: requestId,
+                answers: answers,
+                createdAt: createdAt
+            )
+        case let .turnInterrupt(commandId, _, turnId, createdAt):
+            .turnInterrupt(
+                commandId: commandId,
+                threadId: id,
+                turnId: turnId,
+                createdAt: createdAt
+            )
         }
     }
 }

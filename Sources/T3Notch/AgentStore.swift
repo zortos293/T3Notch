@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 import T3NotchCore
 
 @MainActor
@@ -11,6 +12,23 @@ final class AgentStore {
         case pill
         case expanded
         case attention
+    }
+
+    /// The settings that decide what the local aggregate is made of.
+    private struct ConfiguredSources: Equatable {
+        var watchT3: Bool
+        var watchClaude: Bool
+        var watchCodex: Bool
+        var hookListener: Bool
+        var hookPort: Int
+
+        init(_ values: SettingsStore.Values) {
+            watchT3 = values.watchT3
+            watchClaude = values.watchClaude
+            watchCodex = values.watchCodex
+            hookListener = values.claudeHookListener
+            hookPort = values.claudeHookPort
+        }
     }
 
     private enum RemoteRestoreResult: Sendable {
@@ -53,8 +71,15 @@ final class AgentStore {
     /// show even with no agents running.
     private(set) var walkthrough: Walkthrough?
     private var isWalkthroughOpen = false
-    var needsOnboarding = false
     var onboardingMessage: String?
+    /// Per-source connection state and, when a source is down for a reason worth
+    /// explaining (T3 auth), the message the settings row shows.
+    var sourceStatuses: [AgentSource: ConnectionState] = [:]
+    var sourceProblems: [AgentSource: String] = [:]
+    /// Set when the hook listener could not take the configured port.
+    var claudeHookProblem: String?
+    /// Result of the last hook install or removal.
+    var claudeHookMessage: String?
     var answeredRequestIds: Set<String> = []
     var environment: EnvironmentDescriptor?
     var machines: [EnvironmentSnapshot] = []
@@ -67,6 +92,12 @@ final class AgentStore {
 
     private(set) var endpoint = ServerEndpoint()
     private let coordinator = MultiEnvironmentCoordinator()
+    /// The local machine's transport: T3 plus whichever agent CLIs are watched.
+    private var localSources: AggregatingTransport?
+    private var hookServer: ClaudeHookServer?
+    /// Which source configuration `localSources` was built for, so unrelated
+    /// setting changes don't tear down running transports.
+    private var configuredSources: ConfiguredSources?
     private let profileStore = EnvironmentProfileStore()
     private let remoteVault = RemoteCredentialVault()
     private let t3ConnectImporter = ElectronSafeStorageImporter()
@@ -84,6 +115,14 @@ final class AgentStore {
     private var t3ConnectConfiguration: T3ConnectConfiguration?
     private var t3ConnectEnabledStates: [EnvironmentID: Bool] = [:]
     private var remoteRestoreInFlight = false
+    /// Rebuilds suspend on discovery and token checks, so they are serialized:
+    /// an overtaken rebuild would leave `configuredSources` describing a set of
+    /// transports that was never built, and nothing would rebuild again.
+    private var localRebuildInFlight = false
+    /// Bumped on every local rebuild; a T3 attach that finishes after another
+    /// rebuild started must throw its transport away instead of registering.
+    private var t3AttachGeneration = 0
+    private var localRebuildPending = false
     private var directFailureCounts: [EnvironmentID: Int] = [:]
     private var directProbeSuccesses: [EnvironmentID: Int] = [:]
     private var connectFallbacksInFlight: Set<EnvironmentID> = []
@@ -340,13 +379,34 @@ final class AgentStore {
         recomputePresentation(userInitiated: false)
     }
 
-    /// Opens the thread in T3 Code's own UI, which is what "reviewed" means here.
+    /// The wording of the review button, which differs by where the thread came
+    /// from: T3 Code has a UI to open, a local CLI session only has a terminal.
+    func openLabel(for thread: ThreadShell) -> String {
+        source(of: thread) == .t3 ? "Open in T3 Code" : "Show terminal"
+    }
+
+    func source(of thread: ThreadShell) -> AgentSource {
+        guard let scoped = scopedThreads[thread.id] else { return .t3 }
+        return AgentSource(threadId: scoped.threadID)
+    }
+
+    /// Shows the thread where its work actually lives, which is what "reviewed"
+    /// means here.
     ///
-    /// The desktop app is preferred when it is already running: T3 Code registers
-    /// `t3code://` but only ever reveals its window on a second instance, so there
-    /// is no deep link to a single thread. Bringing it forward beats opening a
-    /// duplicate of the same thread in a browser tab.
-    func openInT3Code(_ thread: ThreadShell) {
+    /// For T3 Code the desktop app is preferred when it is already running: it
+    /// registers `t3code://` but only ever reveals its window on a second
+    /// instance, so there is no deep link to a single thread. Bringing it forward
+    /// beats opening a duplicate of the same thread in a browser tab. Locally
+    /// watched CLI sessions have no UI at all, so the terminal hosting them is
+    /// raised instead.
+    func openThread(_ thread: ThreadShell) {
+        guard source(of: thread) == .t3 else {
+            if !TerminalApp.activate(forPid: thread.ownerPid) {
+                TerminalApp.activateAnyTerminal()
+            }
+            markReviewed(thread)
+            return
+        }
         guard let scoped = scopedThreads[thread.id],
               let snapshot = snapshotsByEnvironment[scoped.environmentID]
         else {
@@ -550,61 +610,186 @@ final class AgentStore {
     }
 
     func start() async {
-        let localEndpoint = await ServerDiscovery.resolveEndpoint()
-        self.endpoint = localEndpoint
-        var token = KeychainStore.loadToken()
+        await rebuildLocalSources()
+        startMergeWatch()
+        await refreshT3ConnectDetectionNow()
+        await restoreRemoteMachines()
+    }
 
+    /// Rebuilds the local machine's transport from the current source settings.
+    /// Registering replaces the previous session, which stops the transport it
+    /// was holding — without that, every reconnect stacked another poller.
+    ///
+    /// Only one rebuild runs at a time; a request arriving mid-flight is folded
+    /// into one more pass afterwards, so the last settings always win.
+    private func rebuildLocalSources() async {
+        guard !localRebuildInFlight else {
+            localRebuildPending = true
+            return
+        }
+        localRebuildInFlight = true
+        defer { localRebuildInFlight = false }
+        repeat {
+            localRebuildPending = false
+            await performLocalRebuild()
+        } while localRebuildPending
+    }
+
+    private func performLocalRebuild() async {
+        let values = settings.values
+        configuredSources = ConfiguredSources(values)
+        if !values.watchT3 {
+            sourceProblems[.t3] = nil
+            sourceStatuses[.t3] = nil
+        }
+
+        // Claude/Codex need no auth and must never wait on T3: discovery plus
+        // token minting can shell out to `npx` for over a minute, and an early
+        // build of this method sat on exactly that while the notch showed
+        // nothing. Register the local sources now; attach T3 when it answers.
+        await registerLocalAggregate(t3: nil, values: values)
+
+        guard values.watchT3 else { return }
+        t3AttachGeneration &+= 1
+        let generation = t3AttachGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            let localEndpoint = await ServerDiscovery.resolveEndpoint()
+            guard self.t3AttachGeneration == generation else { return }
+            self.endpoint = localEndpoint
+            let t3 = await self.makeT3Source(endpoint: localEndpoint)
+            guard let t3 else { return }
+            guard self.t3AttachGeneration == generation,
+                  self.configuredSources == ConfiguredSources(self.settings.values)
+            else {
+                t3.transport.stop()
+                return
+            }
+            await self.registerLocalAggregate(t3: t3, values: self.settings.values)
+        }
+    }
+
+    private func registerLocalAggregate(t3: T3Source?, values: SettingsStore.Values) async {
+
+        let localDescriptor = t3?.descriptor
+        environment = localDescriptor
+        let localID = EnvironmentID(localDescriptor?.environmentId?.nilIfBlank ?? "local")
+        // The id follows T3's environment, so watching T3 (or minting a token)
+        // renames the local machine. Registering under the new key would leave
+        // the old session polling and tailing forever beside the new one.
+        if let previous = localEnvironmentID, previous != localID {
+            coordinator.remove(previous)
+        }
+        localEnvironmentID = localID
+        normalizeT3ConnectProfiles(localEnvironmentID: localID)
+
+        let hookServer = await startHookServer()
+        let aggregate = TransportFactory.makeAggregate(
+            t3: t3?.transport,
+            enableClaude: values.watchClaude,
+            enableCodex: values.watchCodex,
+            hookServer: hookServer
+        )
+        localSources = aggregate
+        coordinator.register(
+            profile: EnvironmentProfile(
+                environmentID: localID,
+                label: localDescriptor?.label?.nilIfBlank ?? "This Mac",
+                directEndpoint: endpoint,
+                source: .local
+            ),
+            descriptor: localDescriptor,
+            transport: aggregate
+        )
+        connectionState = .connecting
+        refreshSourceStatuses()
+    }
+
+    /// Called on quit. Stopping the hook listener answers every held permission
+    /// prompt with "ask", so the terminal takes the question back instead of
+    /// hanging until curl's timeout.
+    func shutdown() {
+        hookServer?.stop()
+        hookServer = nil
+        coordinator.stop()
+    }
+
+    private struct T3Source {
+        let transport: PollingTransport
+        let descriptor: EnvironmentDescriptor?
+    }
+
+    /// Builds the T3 child. A failure here records a source problem and returns
+    /// nil; the other sources still run, so bad T3 auth no longer stops the app.
+    private func makeT3Source(endpoint: ServerEndpoint) async -> T3Source? {
+        var token = KeychainStore.loadToken()
         if token == nil {
             do {
                 let minted = try await TokenMinting.mintToken()
                 try KeychainStore.saveToken(minted)
                 token = minted
             } catch {
-                needsOnboarding = true
-                onboardingMessage =
+                recordT3Failure(
                     "Could not mint a token automatically.\n\nRun:\n  npx -y t3@latest auth session issue --token-only\n\nand paste it here.\n\n\(error.localizedDescription)"
-                connectionState = .unauthorized
-                return
+                )
+                return nil
             }
         }
-
-        guard let token else { return }
-
+        guard let token else {
+            recordT3Failure("No T3 Code token available.")
+            return nil
+        }
         do {
-            _ = try await TokenMinting.verifyToken(token: token, endpoint: localEndpoint)
+            _ = try await TokenMinting.verifyToken(token: token, endpoint: endpoint)
         } catch {
-            needsOnboarding = true
-            onboardingMessage =
+            recordT3Failure(
                 "Saved token was rejected. Paste a fresh token from:\n  npx -y t3@latest auth session issue --token-only\n\n\(error.localizedDescription)"
-            connectionState = .unauthorized
-            return
+            )
+            return nil
         }
 
-        needsOnboarding = false
-        let client = T3HTTPClient(endpoint: localEndpoint, token: token)
-        let localDescriptor = try? await client.fetchEnvironment()
-        environment = localDescriptor
-        let localID = EnvironmentID(localDescriptor?.environmentId?.nilIfBlank ?? "local")
-        localEnvironmentID = localID
-        normalizeT3ConnectProfiles(localEnvironmentID: localID)
-        coordinator.register(
-            profile: EnvironmentProfile(
-                environmentID: localID,
-                label: localDescriptor?.label?.nilIfBlank ?? "This Mac",
-                directEndpoint: localEndpoint,
-                source: .local
-            ),
-            descriptor: localDescriptor,
-            endpoint: localEndpoint,
-            authorizer: BearerHTTPAuthorizer(token: token)
+        sourceProblems[.t3] = nil
+        onboardingMessage = nil
+        let client = T3HTTPClient(endpoint: endpoint, token: token)
+        return T3Source(
+            transport: PollingTransport(client: client),
+            descriptor: try? await client.fetchEnvironment()
         )
-        connectionState = .connecting
-        startMergeWatch()
-        await refreshT3ConnectDetectionNow()
-        await restoreRemoteMachines()
+    }
+
+    private func recordT3Failure(_ message: String) {
+        sourceProblems[.t3] = message
+        sourceStatuses[.t3] = .unauthorized
+        onboardingMessage = message
+    }
+
+    /// Starts the hook listener the Claude transport answers approvals through.
+    /// The port is fixed on purpose, so a collision is reported rather than
+    /// worked around: the installed hook entries name that exact port.
+    private func startHookServer() async -> ClaudeHookServer? {
+        hookServer?.stop()
+        hookServer = nil
+        claudeHookProblem = nil
+        let values = settings.values
+        guard values.watchClaude, values.claudeHookListener else { return nil }
+        let server = ClaudeHookServer(port: UInt16(clamping: values.claudeHookPort))
+        do {
+            // The listener we just cancelled hands the port back asynchronously;
+            // `start()` retries the bind rather than reporting a false collision.
+            try await server.start()
+            hookServer = server
+            return server
+        } catch {
+            claudeHookProblem =
+                "Port \(values.claudeHookPort) is in use — change the port and reinstall hooks."
+            return nil
+        }
     }
 
     private func restoreRemoteMachines() async {
+        // Remote machines ride T3 Connect credentials from the vault, another
+        // Keychain item. All of T3 stays behind the one toggle.
+        guard settings.values.watchT3 else { return }
         guard !remoteRestoreInFlight else { return }
         remoteRestoreInFlight = true
         defer { remoteRestoreInFlight = false }
@@ -777,7 +962,114 @@ final class AgentStore {
         if !settings.values.celebrateMilestones {
             dismissCelebration()
         }
+
+        // Only a change to what the local machine watches justifies dropping the
+        // running transports; every other setting is read where it is used.
+        if configuredSources != ConfiguredSources(settings.values) {
+            let t3TurnedOn = configuredSources?.watchT3 == false && settings.values.watchT3
+            Task {
+                await rebuildLocalSources()
+                if t3TurnedOn {
+                    await refreshT3ConnectDetectionNow()
+                    await restoreRemoteMachines()
+                }
+            }
+        }
         recomputePresentation(userInitiated: true)
+    }
+
+    /// Sources the user asked for. Ones switched off are not "down".
+    var enabledSources: [AgentSource] {
+        var sources: [AgentSource] = []
+        if settings.values.watchT3 { sources.append(.t3) }
+        if settings.values.watchClaude { sources.append(.claude) }
+        if settings.values.watchCodex { sources.append(.codex) }
+        return sources
+    }
+
+    /// The token panel only takes over the notch when there is nothing else to
+    /// show: every source the user enabled is down, and no threads are known.
+    /// A broken T3 token alone is a settings row, not a blocking screen.
+    var needsOnboarding: Bool {
+        guard !isDemoRunning, threads.isEmpty else { return false }
+        let sources = enabledSources
+        guard !sources.isEmpty else { return false }
+        return sources.allSatisfy { source in
+            switch sourceStatuses[source] ?? .connecting {
+            case .disconnected, .unauthorized: true
+            case .connected, .connecting: false
+            }
+        }
+    }
+
+    /// Live sessions the local machine's aggregate is showing for one source,
+    /// for the settings status lines. Remote machines run T3 too, so they are
+    /// left out: this counts what the local sources found.
+    func localSessionCount(for source: AgentSource) -> Int {
+        threads.filter { thread in
+            guard let scoped = scopedThreads[thread.id],
+                  scoped.environmentID == localEnvironmentID
+            else { return false }
+            return AgentSource(threadId: scoped.threadID) == source
+        }
+        .count
+    }
+
+    /// The token panel's way out: T3 Code is one source of three, and refusing
+    /// to paste a token should not leave the panel stuck.
+    func stopWatchingT3() {
+        settings.set(\.watchT3, to: false)
+    }
+
+    // MARK: - Claude Code hooks
+
+    func claudeHookStatus() -> ClaudeHookStatus {
+        ClaudeHookInstaller().status()
+    }
+
+    /// Hooks hot-reload into running Claude Code sessions, so both of these take
+    /// effect without restarting anything.
+    func installClaudeHooks() {
+        do {
+            try ClaudeHookInstaller().install(
+                port: UInt16(clamping: settings.values.claudeHookPort)
+            )
+            claudeHookMessage = nil
+            // A hook that reaches nothing is worse than none, so a listener that
+            // never started (source off at launch, port taken) is started now.
+            if hookServer == nil {
+                Task { await rebuildLocalSources() }
+            }
+        } catch {
+            claudeHookMessage = "Could not update ~/.claude/settings.json: \(error)"
+        }
+    }
+
+    func removeClaudeHooks() {
+        do {
+            try ClaudeHookInstaller().uninstall()
+            claudeHookMessage = nil
+        } catch {
+            claudeHookMessage = "Could not update ~/.claude/settings.json: \(error)"
+        }
+    }
+
+    /// Reads each child's state back out of the aggregate. Called whenever the
+    /// local environment reports in, which is the only moment the combined state
+    /// can have moved.
+    func refreshSourceStatuses() {
+        guard let localSources else { return }
+        for source in AgentSource.allCases {
+            guard enabledSources.contains(source) else {
+                sourceStatuses[source] = nil
+                continue
+            }
+            // A source that failed to build has no child to ask; its recorded
+            // problem already says why it is down.
+            guard sourceProblems[source] == nil else { continue }
+            sourceStatuses[source] = localSources
+                .connectionState(forNamespace: TransportFactory.namespace(for: source))
+        }
     }
 
     /// Merges are a human action minutes or hours after a turn ends, so this
@@ -802,8 +1094,11 @@ final class AgentStore {
             do {
                 _ = try await TokenMinting.verifyToken(token: token, endpoint: endpoint)
                 try KeychainStore.saveToken(token)
-                needsOnboarding = false
-                await start()
+                onboardingMessage = nil
+                sourceProblems[.t3] = nil
+                // Only the local machine's sources depend on the token; the
+                // remote machines already restored are left alone.
+                await rebuildLocalSources()
             } catch {
                 onboardingMessage = "Token rejected: \(error.localizedDescription)"
             }
@@ -877,6 +1172,13 @@ final class AgentStore {
     }
 
     private func refreshT3ConnectDetectionNow() async {
+        // Detection imports T3 Code's Electron credentials from the Keychain,
+        // which prompts. With the T3 source off nothing may touch the Keychain.
+        guard settings.values.watchT3 else {
+            t3ConnectConfiguration = nil
+            t3ConnectDetection = .unavailable
+            return
+        }
         let importer = t3ConnectImporter
         let vault = remoteVault
         let result = await Task.detached(priority: .utility) {
@@ -1565,13 +1867,19 @@ final class AgentStore {
             guard let self else { return }
             for await event in coordinator.events {
                 await self.applyEnvironmentEvent(event)
+                Logger(subsystem: "gg.t3tools.t3notch", category: "trace")
+                    .debug("store: applied event")
             }
+            Logger(subsystem: "gg.t3tools.t3notch", category: "trace")
+                .debug("store: coordinator event loop ENDED")
         }
     }
 
     private func applyEnvironmentEvent(_ event: EnvironmentEvent) async {
         switch event {
         case let .snapshot(snapshot):
+            Logger(subsystem: "gg.t3tools.t3notch", category: "trace")
+                .debug("store: snapshot \(snapshot.profile.environmentID.rawValue, privacy: .public) source=\(String(describing: snapshot.profile.source), privacy: .public) shellThreads=\(snapshot.shell?.threads.count ?? -1) state=\(String(describing: snapshot.connectionState), privacy: .public)")
             retainRemoteCompletionTransition(
                 from: snapshotsByEnvironment[snapshot.profile.environmentID],
                 to: snapshot
@@ -1579,9 +1887,11 @@ final class AgentStore {
             snapshotsByEnvironment[snapshot.profile.environmentID] = snapshot
             if snapshot.profile.source == .local {
                 connectionState = legacyConnectionState(snapshot.connectionState)
-                if snapshot.connectionState == .unauthorized {
-                    needsOnboarding = true
-                    onboardingMessage = "Session expired. Paste a new bearer token."
+                refreshSourceStatuses()
+                if sourceStatuses[.t3] == .unauthorized, sourceProblems[.t3] == nil {
+                    let message = "Session expired. Paste a new bearer token."
+                    sourceProblems[.t3] = message
+                    onboardingMessage = message
                 }
             }
             Task { [weak self] in

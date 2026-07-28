@@ -76,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         remoteRefreshTimer?.invalidate()
         remoteRefreshTimer = nil
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        // Stopping the hook listener answers every held permission prompt with
+        // "ask", handing the question back to the terminal immediately.
+        store.shutdown()
     }
 
     private func startConnectivityObservers() {

@@ -121,6 +121,28 @@ Remote credentials use a separate, versioned Keychain vault and survive app
 updates. T3Notch asks you to unlock that vault if macOS requires access again; it
 never deletes a remote session merely because the app signature changed.
 
+## Claude Code and Codex
+
+T3Notch also watches the agent CLIs running on this Mac, with no server and no
+token. Sessions you start yourself — `claude` in a terminal, the desktop app, or
+`codex` — appear as cards beside your T3 Code threads, one per agent, grouped by
+project.
+
+- **Claude Code** needs zero setup: the live session registry
+  (`~/.claude/sessions`) provides the roster and busy/idle state, and the
+  transcript provides the activity feed, task list, branch and context gauge.
+  Installing the optional hooks (**Settings → Agent sources → Install hooks**)
+  additionally routes permission prompts to the notch, where they are answered
+  in place — the terminal keeps working as a fallback if the notch does not
+  answer. The installer only ever appends to `~/.claude/settings.json`, backs
+  it up first, and leaves any hooks you already had untouched.
+- **Codex** cards are read-only: commands, the plan and token usage are tailed
+  from the session rollouts, including sessions resumed from days past.
+
+Each source has its own switch in **Settings → Agent sources**, and everything
+T3 — the local server, tokens, T3 Connect and its Keychain items — stays behind
+the **Watch T3 Code** toggle: with it off, nothing touches the Keychain.
+
 ## Remote machines
 
 T3Notch can monitor the T3 Code environments on a Mac mini, another MacBook, or

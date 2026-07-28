@@ -80,14 +80,14 @@ struct Walkthrough: Equatable {
             case .running:
                 return Caption(
                     title: "Testing the connection",
-                    detail: "Asking the local server who is running.",
+                    detail: "Asking every watched source who is running.",
                     symbol: "antenna.radiowaves.left.and.right",
                     tint: .cyan,
                     chip: "Testing"
                 )
             case let .passed(summary):
                 return Caption(
-                    title: "Connected to T3 Code",
+                    title: "Connected",
                     detail: summary,
                     symbol: "checkmark.circle.fill",
                     tint: .green,
@@ -95,7 +95,7 @@ struct Walkthrough: Equatable {
                 )
             case let .failed(message):
                 return Caption(
-                    title: "Cannot reach T3 Code",
+                    title: "No sources answering",
                     detail: message,
                     symbol: "exclamationmark.triangle.fill",
                     tint: .orange,

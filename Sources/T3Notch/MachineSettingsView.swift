@@ -24,7 +24,7 @@ struct MachineSettingsCard: View {
             } else {
                 SettingsRow(
                     "This Mac",
-                    detail: store.endpoint.baseURL.absoluteString
+                    detail: "T3 Code at " + store.endpoint.baseURL.absoluteString
                 ) {
                     PillButton("Reconnect") { store.bootstrap() }
                 }
@@ -300,7 +300,10 @@ struct MachineSettingsCard: View {
     private func machineDetail(_ machine: EnvironmentSnapshot) -> String {
         let platform = machine.descriptor?.platform?.displayName
         let version = machine.descriptor?.serverVersion
-        let endpoint = machine.profile.directEndpoint?.baseURL.absoluteString
+        // Machines are T3 Code servers; the local Claude and Codex sources have
+        // no endpoint and live in the Agent sources card instead.
+        let endpoint = machine.profile.directEndpoint
+            .map { "T3 Code at " + $0.baseURL.absoluteString }
         let summary = [platform, version, endpoint].compactMap { $0?.nilIfBlank }
         let suffix = summary.isEmpty ? "" : " · " + summary.joined(separator: " · ")
         return machine.connectionState.label + suffix

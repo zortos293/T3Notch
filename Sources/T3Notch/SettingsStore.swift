@@ -49,6 +49,18 @@ final class SettingsStore {
         var updateChannel = UpdateChannel.stable
         /// Cleared once the quick start has been dismissed.
         var needsQuickStart = true
+
+        /// Which agent runtimes the notch watches.
+        var watchT3 = true
+        var watchClaude = true
+        var watchCodex = true
+
+        /// Listen for Claude Code hook callbacks, which is what makes its
+        /// permission prompts answerable from the notch.
+        var claudeHookListener = true
+        /// Fixed on purpose: the installed hook entries carry this port, so
+        /// falling back to another one would silently desync them.
+        var claudeHookPort = 19725
     }
 
     private(set) var values: Values
@@ -125,6 +137,11 @@ final class SettingsStore {
         values.updateChannel =
             defaults.string(forKey: prefix + "updateChannel")
             .flatMap(UpdateChannel.init(rawValue:)) ?? values.updateChannel
+        values.watchT3 = bool("watchT3", values.watchT3)
+        values.watchClaude = bool("watchClaude", values.watchClaude)
+        values.watchCodex = bool("watchCodex", values.watchCodex)
+        values.claudeHookListener = bool("claudeHookListener", values.claudeHookListener)
+        values.claudeHookPort = int("claudeHookPort", values.claudeHookPort, in: portRange)
 
         return values
     }
@@ -147,6 +164,11 @@ final class SettingsStore {
         defaults.set(values.automaticUpdates, forKey: Self.prefix + "automaticUpdates")
         defaults.set(values.automaticDownload, forKey: Self.prefix + "automaticDownload")
         defaults.set(values.updateChannel.rawValue, forKey: Self.prefix + "updateChannel")
+        defaults.set(values.watchT3, forKey: Self.prefix + "watchT3")
+        defaults.set(values.watchClaude, forKey: Self.prefix + "watchClaude")
+        defaults.set(values.watchCodex, forKey: Self.prefix + "watchCodex")
+        defaults.set(values.claudeHookListener, forKey: Self.prefix + "claudeHookListener")
+        defaults.set(values.claudeHookPort, forKey: Self.prefix + "claudeHookPort")
         if let displayName = values.displayName {
             defaults.set(displayName, forKey: Self.prefix + "displayName")
         } else {
@@ -155,4 +177,5 @@ final class SettingsStore {
     }
 
     static let rowRange = 3...8
+    static let portRange = 1024...65535
 }
