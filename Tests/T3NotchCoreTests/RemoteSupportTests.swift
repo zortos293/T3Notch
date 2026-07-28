@@ -121,6 +121,19 @@ private final class BooleanFlag: @unchecked Sendable {
 
 @Suite("Remote support", .serialized)
 struct RemoteSupportTests {
+    @Test func formURLEncodingUsesHTMLFormRules() {
+        let body = FormURLEncoding.data([
+            ("space", "a b"),
+            ("asterisk", "*"),
+            ("tilde", "~"),
+        ])
+
+        #expect(
+            String(decoding: body, as: UTF8.self)
+                == "space=a+b&asterisk=*&tilde=%7E"
+        )
+    }
+
     @Test func canonicalizesHTTPAndDerivesWebSocketEndpoint() throws {
         let endpoint = try ServerEndpoint(
             httpBaseURL: #require(URL(string: "HTTPS://mini.example.com:8443/pair?q=secret#token"))

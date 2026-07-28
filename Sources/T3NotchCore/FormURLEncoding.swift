@@ -14,7 +14,9 @@ enum FormURLEncoding {
         var encoded = ""
         encoded.reserveCapacity(value.utf8.count)
         for byte in value.utf8 {
-            if isUnreserved(byte) {
+            if byte == 0x20 {
+                encoded.append("+")
+            } else if isFormUnescaped(byte) {
                 encoded.unicodeScalars.append(UnicodeScalar(byte))
             } else {
                 encoded.append("%")
@@ -25,13 +27,13 @@ enum FormURLEncoding {
         return encoded
     }
 
-    private static func isUnreserved(_ byte: UInt8) -> Bool {
+    private static func isFormUnescaped(_ byte: UInt8) -> Bool {
         (byte >= 65 && byte <= 90)
             || (byte >= 97 && byte <= 122)
             || (byte >= 48 && byte <= 57)
+            || byte == 42
             || byte == 45
             || byte == 46
             || byte == 95
-            || byte == 126
     }
 }

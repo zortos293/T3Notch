@@ -141,8 +141,8 @@ public final class MultiEnvironmentCoordinator: @unchecked Sendable {
         previous?.cancelShellTask()
         emit(session)
         let shellTask = Task { [weak self, weak session] in
-            guard let self, let session else { return }
             for await shell in transport.shell {
+                guard let self, let session else { return }
                 session.updateShell(shell)
                 self.emit(session)
             }
