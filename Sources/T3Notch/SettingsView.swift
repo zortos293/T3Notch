@@ -186,34 +186,7 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsCard("Connection") {
-                    SettingsRow(
-                        connectionTitle,
-                        detail: store.endpoint.baseURL.absoluteString
-                    ) {
-                        PillButton("Reconnect") {
-                            store.bootstrap()
-                        }
-                    }
-                    SettingsDivider()
-                    SettingsDivider()
-                    SettingsRow(
-                        "Quick start",
-                        detail: "The first-launch walkthrough, with a connection test."
-                    ) {
-                        PillButton("Show", action: onShowQuickStart)
-                    }
-                    SettingsDivider()
-                    SettingsRow(
-                        "Environment",
-                        detail: [store.machineLabel, store.serverVersionLabel]
-                            .compactMap { $0 }
-                            .joined(separator: " · ")
-                            .nilIfBlank ?? "Not connected yet"
-                    ) {
-                        EmptyView()
-                    }
-                }
+                MachineSettingsCard(store: store, onShowQuickStart: onShowQuickStart)
 
                 HStack {
                     Spacer()
@@ -251,15 +224,6 @@ struct SettingsView: View {
             "“Open in T3 Code” brings the desktop app forward instead of opening a browser tab. "
             + "T3 Code has no deep link to a single thread, so it lands on whatever it was showing."
         return T3CodeApp.isRunning ? base : base + " Not running right now, so the browser is used."
-    }
-
-    private var connectionTitle: String {
-        switch store.connectionState {
-        case .connected: "Connected"
-        case .connecting: "Connecting…"
-        case .unauthorized: "Not authorised"
-        case .disconnected: "Disconnected"
-        }
     }
 
     private var header: some View {
@@ -348,7 +312,7 @@ private struct UpdateControls: View {
 }
 
 /// A titled group of rows on a rounded card.
-private struct SettingsCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
 
@@ -381,7 +345,7 @@ private struct SettingsCard<Content: View>: View {
     }
 }
 
-private struct SettingsDivider: View {
+struct SettingsDivider: View {
     var body: some View {
         Rectangle()
             .fill(.white.opacity(0.06))
@@ -391,7 +355,7 @@ private struct SettingsDivider: View {
 }
 
 /// Label, explanation, and whatever control the row needs on the right.
-private struct SettingsRow<Control: View>: View {
+struct SettingsRow<Control: View>: View {
     let title: String
     let detail: String?
     var detailIsProblem = false
@@ -433,7 +397,7 @@ private struct SettingsRow<Control: View>: View {
     }
 }
 
-private struct SettingsToggle: View {
+struct SettingsToggle: View {
     let title: String
     let detail: String?
     @Binding var isOn: Bool
@@ -462,7 +426,7 @@ private struct SettingsToggle: View {
 
 /// The panel's own switch: a stock macOS one would fight the dark rounded cards,
 /// and this dims itself when the row is disabled.
-private struct NotchToggleStyle: ToggleStyle {
+struct NotchToggleStyle: ToggleStyle {
     @Environment(\.isEnabled) private var isEnabled
 
     private static let on = Color(red: 0.21, green: 0.44, blue: 0.98)
@@ -547,7 +511,7 @@ private struct SettingsStepperRow: View {
     }
 }
 
-private struct PillButton: View {
+struct PillButton: View {
     let title: String
     let action: () -> Void
 
