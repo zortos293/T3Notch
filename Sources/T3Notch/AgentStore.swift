@@ -141,7 +141,7 @@ final class AgentStore {
         return threads.compactMap { thread -> (ThreadShell, AgentAwarenessPhase)? in
             guard let phase = resolveThreadAwarenessPhase(thread) else { return nil }
             switch phase {
-            case .running, .starting, .waitingForApproval, .waitingForInput, .failed:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput, .failed:
                 return (thread, phase)
             case .completed:
                 // A finished agent stays pinned until it has been reviewed in
@@ -452,7 +452,8 @@ final class AgentStore {
     }
 
     func elapsedLabel(for thread: ThreadShell) -> String? {
-        guard let start = turnStart(of: thread) else { return nil }
+        guard resolveThreadAwarenessPhase(thread) != .waitingForSubagents,
+              let start = turnStart(of: thread) else { return nil }
         // A finished turn's duration is fixed; only a live one counts up.
         let end = thread.latestTurn?.completedAt.flatMap(ISO8601Parsing.date(from:)) ?? clock
         let seconds = max(0, Int(end.timeIntervalSince(start)))
@@ -534,6 +535,8 @@ final class AgentStore {
         switch phase {
         case .running, .starting:
             return "Working since \(startedAtLabel)\(duration)"
+        case .waitingForSubagents:
+            return nil
         case .waitingForApproval, .waitingForInput:
             return "Waiting since \(startedAtLabel)\(duration)"
         case .failed:
@@ -1686,7 +1689,7 @@ final class AgentStore {
                 } else {
                     retained[thread.id] = nil
                 }
-            case .running, .starting, .waitingForApproval, .waitingForInput:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
                 retained[thread.id] = nil
             default:
                 if let prior = previousByID[thread.id],
@@ -1712,7 +1715,7 @@ final class AgentStore {
             switch resolveThreadAwarenessPhase(thread) {
             case .completed:
                 completion = thread
-            case .running, .starting, .waitingForApproval, .waitingForInput:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
                 completion = completedCopy(
                     of: thread,
                     at: incomingShell.updatedAt,
@@ -1733,7 +1736,7 @@ final class AgentStore {
 
     private func isActiveWork(_ phase: AgentAwarenessPhase?) -> Bool {
         switch phase {
-        case .running, .starting, .waitingForApproval, .waitingForInput:
+        case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
             true
         default:
             false
@@ -2314,6 +2317,7 @@ final class AgentStore {
         case .waitingForInput: return 40
         case .failed: return 30
         case .running: return 20
+        case .waitingForSubagents: return 15
         case .starting: return 10
         case .completed: return 5
         case .stale: return 0

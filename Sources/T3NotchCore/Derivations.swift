@@ -5,6 +5,7 @@ import Foundation
 public enum AgentAwarenessPhase: String, Sendable, Equatable, CaseIterable {
     case starting
     case running
+    case waitingForSubagents = "waiting_for_subagents"
     case waitingForApproval = "waiting_for_approval"
     case waitingForInput = "waiting_for_input"
     case completed
@@ -22,6 +23,9 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     }
     if thread.session?.status == "error" || thread.latestTurn?.state == "error" {
         return .failed
+    }
+    if thread.session?.status == AgentAwarenessPhase.waitingForSubagents.rawValue {
+        return .waitingForSubagents
     }
     if thread.session?.status == "starting" {
         return .starting
@@ -100,6 +104,7 @@ public func headline(for phase: AgentAwarenessPhase) -> String {
     switch phase {
     case .starting: return "Starting"
     case .running: return "Working"
+    case .waitingForSubagents: return "Waiting on subagents"
     case .waitingForApproval: return "Needs approval"
     case .waitingForInput: return "Needs input"
     case .completed: return "Done"

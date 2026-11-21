@@ -86,22 +86,28 @@ private struct TopStrip: View {
     var body: some View {
         let working = store.activeThreads.filter {
             switch resolveThreadAwarenessPhase($0) {
-            case .running, .starting: true
+            case .running, .starting, .waitingForSubagents: true
             default: false
             }
+        }
+        let includesSubagentWait = working.contains { resolveThreadAwarenessPhase($0) == .waitingForSubagents }
+        let groupStatus = if working.count == 1 {
+            includesSubagentWait ? headline(for: .waitingForSubagents) : "Working"
+        } else {
+            "\(working.count) \(includesSubagentWait ? "active" : "working")"
         }
         let showingOtherThread = working.first?.id != store.focusedThread?.id
         if !isExpanded, !working.isEmpty, working.count > 1 || showingOtherThread,
            store.focusedPhase != .waitingForInput, store.focusedPhase != .waitingForApproval
         {
             if working.count <= 2 {
-                workingStrip(working[...], count: working.count)
+                workingStrip(working[...], status: groupStatus)
             } else {
                 TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 4)) { context in
                     let pageCount = (working.count + 1) / 2
                     let page = Int(context.date.timeIntervalSinceReferenceDate / 4) % pageCount
                     let start = page * 2
-                    workingStrip(working[start..<min(start + 2, working.count)], count: working.count)
+                    workingStrip(working[start..<min(start + 2, working.count)], status: groupStatus)
                 }
             }
         } else {
@@ -115,6 +121,7 @@ private struct TopStrip: View {
                 providerStatusIcon(
                     store.providerBrand,
                     isWorking: store.focusedPhase == .running || store.focusedPhase == .starting
+                        || store.focusedPhase == .waitingForSubagents
                 )
 
                 Text(leadingLabel)
@@ -160,7 +167,7 @@ private struct TopStrip: View {
         .padding(.horizontal, 10)
     }
 
-    private func workingStrip(_ threads: ArraySlice<ThreadShell>, count: Int) -> some View {
+    private func workingStrip(_ threads: ArraySlice<ThreadShell>, status: String) -> some View {
         HStack(spacing: metrics.hasPhysicalNotch ? 0 : 12) {
             if let first = threads.first {
                 workingTitle(first)
@@ -177,7 +184,7 @@ private struct TopStrip: View {
                     workingTitle(second)
                 }
                 Spacer(minLength: 2)
-                Text(count == 1 ? "Working" : "\(count) working")
+                Text(status)
                     .foregroundStyle(.white.opacity(0.85))
                     .fixedSize()
             }
@@ -486,7 +493,7 @@ private struct ThreadCard: View {
         case .waitingForApproval, .waitingForInput: .orange
         case .failed: .red
         case .completed: .green
-        case .running, .starting: .cyan
+        case .running, .starting, .waitingForSubagents: .cyan
         case .stale: .gray
         }
     }
@@ -825,7 +832,7 @@ private struct PhaseChip: View {
         case .waitingForApproval, .waitingForInput: return .orange
         case .failed: return .red
         case .completed: return .green
-        case .running, .starting: return .cyan
+        case .running, .starting, .waitingForSubagents: return .cyan
         case .stale: return .gray
         }
     }

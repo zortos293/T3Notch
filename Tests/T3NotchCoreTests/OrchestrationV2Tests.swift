@@ -15,6 +15,25 @@ struct OrchestrationV2Tests {
         #expect(resolveThreadAwarenessPhase(waiting) == .waitingForInput)
     }
 
+    @Test func completedParentStaysVisibleUntilItsSubagentsFinish() throws {
+        func shell(backgroundTasks: String) throws -> ShellSnapshot {
+            let data = Data("""
+            {"snapshotSequence":1,"projects":[],"threads":[{
+              \(thread),"status":"completed","latestRunId":"run",
+              "latestRunCompletedAt":"2026-11-21T12:00:00Z","pendingBackgroundTasks":\(backgroundTasks)
+            }]}
+            """.utf8)
+            return try JSONDecoder().decode(OrchestrationV2Shell.self, from: data).snapshot
+        }
+
+        let waiting = try shell(backgroundTasks: #"[{"kind":"subagent"}]"#)
+        let finished = try shell(backgroundTasks: "[]")
+        let unrelated = try shell(backgroundTasks: #"[{"kind":"command"}]"#)
+        #expect(resolveThreadAwarenessPhase(try #require(waiting.threads.first)) == .waitingForSubagents)
+        #expect(resolveThreadAwarenessPhase(try #require(unrelated.threads.first)) == .completed)
+        #expect(newlyFinishedThreads(from: waiting, to: finished).map(\.id) == ["thread"])
+    }
+
     @Test func regularRunsNotifyOnceIncludingRunsThatFinishBetweenPolls() throws {
         let running = try decodeShell(status: "running", request: "null")
         let completed = try decodeShell(status: "completed", request: "null")

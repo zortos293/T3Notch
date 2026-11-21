@@ -193,6 +193,7 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
                     let phase = resolveThreadAwarenessPhase(thread)
                     return phase == .running
                         || phase == .starting
+                        || phase == .waitingForSubagents
                         || phase == .waitingForApproval
                         || phase == .waitingForInput
                 }

@@ -15,6 +15,7 @@ struct OrchestrationV2Shell: Decodable {
     }
 
     struct Thread: Decodable {
+        struct BackgroundTask: Decodable { let kind: String }
         struct Opens: Decodable { let openedAt: Double? }
         let id: String
         let projectId: String
@@ -41,9 +42,15 @@ struct OrchestrationV2Shell: Decodable {
         let activityRunStartedAt: String?
         let status: String
         let pendingRuntimeRequest: Request?
+        let pendingBackgroundTasks: [BackgroundTask]?
 
         var shell: ThreadShell {
             let phase = OrchestrationV2Shell.phase(activityRunStatus ?? status)
+            let waitingOnSubagents = activityRunStatus == nil && activeRunId == nil
+                && ["completed", "idle"].contains(status)
+                && pendingBackgroundTasks?.contains { $0.kind == "subagent" } == true
+            let session = waitingOnSubagents ? Session(status: AgentAwarenessPhase.waitingForSubagents.rawValue)
+                : nil
             let turn = (activeRunId ?? latestRunId).map {
                 LatestTurn(
                     turnId: $0, state: phase,
@@ -58,7 +65,7 @@ struct OrchestrationV2Shell: Decodable {
                 branch: branch, worktreePath: worktreePath, latestTurn: turn,
                 createdAt: createdAt, updatedAt: updatedAt, archivedAt: archivedAt,
                 settledAt: settledAt, lastVisitedAt: lastVisitedAt,
-                lastOpenedAtMilliseconds: opens?.openedAt, usesOrchestrationV2: true, session: turn.map { Session(status: $0.state) },
+                lastOpenedAtMilliseconds: opens?.openedAt, usesOrchestrationV2: true, session: session ?? turn.map { Session(status: $0.state) },
                 latestUserMessageAt: latestUserMessageAt,
                 hasPendingApprovals: pendingRuntimeRequest?.isApproval ?? false,
                 hasPendingUserInput: pendingRuntimeRequest?.isInput ?? false,
