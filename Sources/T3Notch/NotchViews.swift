@@ -1088,9 +1088,9 @@ private struct PromptCarousel: View {
                         ApprovalSlide(
                             approval: approval,
                             onDecision: { decision in
-                                guard let thread = displayedThread else { return }
-                                submit(slide, on: thread) {
-                                    await store.respondToApproval(approval, decision: decision, on: thread)
+                                guard displayedThread != nil || store.isDemoRunning else { return }
+                                submit(slide, on: displayedThread) {
+                                    await store.respondToApproval(approval, decision: decision, on: displayedThread)
                                 }
                             },
                             onOpen: openThread
@@ -1102,9 +1102,9 @@ private struct PromptCarousel: View {
                             isLast: index == slides.count - 1,
                             onToggle: { value in toggle(question: question, label: value) },
                             onAnswer: { answer in
-                                guard let thread = displayedThread else { return }
-                                submit(slide, on: thread) {
-                                    await record(answer, for: question, in: input, on: thread)
+                                guard displayedThread != nil || store.isDemoRunning else { return }
+                                submit(slide, on: displayedThread) {
+                                    await record(answer, for: question, in: input, on: displayedThread)
                                 }
                             },
                             onOpen: openThread
@@ -1152,7 +1152,7 @@ private struct PromptCarousel: View {
         _ answer: JSONValue,
         for question: UserInputQuestion,
         in input: PendingUserInput,
-        on thread: ScopedThreadID
+        on thread: ScopedThreadID?
     ) async -> Bool {
         var requestAnswers = drafts[input.requestId] ?? [:]
         requestAnswers[question.id] = answer
@@ -1167,7 +1167,7 @@ private struct PromptCarousel: View {
     }
 
     private func submit(
-        _ slide: PromptSlide, on thread: ScopedThreadID, action: @escaping @MainActor () async -> Bool
+        _ slide: PromptSlide, on thread: ScopedThreadID?, action: @escaping @MainActor () async -> Bool
     ) {
         guard !submitting else { return }
         submitting = true

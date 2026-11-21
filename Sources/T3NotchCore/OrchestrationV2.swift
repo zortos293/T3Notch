@@ -125,7 +125,9 @@ struct OrchestrationV2Detail: Decodable {
         }
 
         var detail: ThreadDetail {
-            let run = runs.max { $0.ordinal < $1.ordinal }
+            let run = runs.filter {
+                $0.startedAt != nil || ["starting", "running", "waiting", "completed", "failed", "interrupted"].contains($0.status)
+            }.max { $0.ordinal < $1.ordinal } ?? runs.max { $0.ordinal < $1.ordinal }
             let turn = run.map {
                 LatestTurn(
                     turnId: $0.id, state: OrchestrationV2Shell.phase($0.status),
@@ -198,7 +200,7 @@ struct OrchestrationV2Detail: Decodable {
                 })
             case "command_execution", "file_change", "file_search", "web_search",
                  "mcp_tool_call", "dynamic_tool_call", "image_view":
-                let running = ["pending", "running", "streaming"].contains(item["status"]?.stringValue ?? "")
+                let running = ["pending", "running", "streaming", "waiting"].contains(item["status"]?.stringValue ?? "")
                 kind = running ? "tool.started" : "tool.completed"
                 payload["isItemSnapshot"] = .bool(true)
                 let labels = [
