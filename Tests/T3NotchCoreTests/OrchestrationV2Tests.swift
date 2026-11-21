@@ -19,7 +19,11 @@ struct OrchestrationV2Tests {
         let data = Data("""
         {"snapshotSequence":1,"projection":{
           "thread":{\(thread)},
-          "runs":[{"id":"run","ordinal":1,"status":"waiting"},{"id":"next","ordinal":2,"status":"queued"}],
+          "runs":[
+            {"id":"run","ordinal":1,"status":"waiting","startedAt":"2026-11-21T12:01:00Z"},
+            {"id":"already-ran","ordinal":2,"status":"completed","completedAt":"2026-11-21T11:59:00Z"},
+            {"id":"next","ordinal":3,"status":"queued"}
+          ],
           "runtimeRequests":[
             {"id":"question","kind":"user_input","status":"pending","createdAt":"2026-11-21T12:00:00Z"},
             {"id":"sign-in","kind":"auth_refresh","status":"pending","createdAt":"2026-11-21T12:01:00Z"},
@@ -50,6 +54,22 @@ struct OrchestrationV2Tests {
         let deliveryFailure = try #require(detail.activities.first { $0.kind == "prompt.delivery.failed" })
         #expect(detail.latestTurn?.turnId == "run")
         #expect(deliveryFailure.turnId == detail.latestTurn?.turnId)
+    }
+
+    @Test func completedRunsAreOrderedByTheCompletionTime() throws {
+        let data = Data("""
+        {"snapshotSequence":1,"projection":{
+          "thread":{\(thread)},
+          "runs":[
+            {"id":"finished-last","ordinal":1,"status":"completed","completedAt":"2026-11-21T12:00:00.125Z"},
+            {"id":"finished-first","ordinal":2,"status":"completed","completedAt":"2026-11-21T12:00:00Z"},
+            {"id":"waiting","ordinal":3,"status":"queued"}
+          ],
+          "runtimeRequests":[],"messages":[],"turnItems":[]
+        }}
+        """.utf8)
+        let detail = try JSONDecoder().decode(OrchestrationV2Detail.self, from: data).projection.detail
+        #expect(detail.latestTurn?.turnId == "finished-last")
     }
 
     @Test func optionIdentityIncludesTheWireValue() {
