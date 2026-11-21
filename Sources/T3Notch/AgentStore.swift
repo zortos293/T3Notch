@@ -24,7 +24,7 @@ final class AgentStore {
     }
 
     var connectionState: ConnectionState = .connecting
-    var promptError: String?
+    private var failedPromptResponses: Set<ScopedRequestID> = []
     var projects: [ProjectShell] = []
     var threads: [ThreadShell] = []
     var focusedThreadId: String?
@@ -553,30 +553,13 @@ final class AgentStore {
     func start() async {
         let localEndpoint = await ServerDiscovery.resolveEndpoint()
         self.endpoint = localEndpoint
-        var token = KeychainStore.loadToken()
-
-        if token == nil {
-            do {
-                let minted = try await TokenMinting.mintToken()
-                try KeychainStore.saveToken(minted)
-                token = minted
-            } catch {
-                needsOnboarding = true
-                onboardingMessage =
-                    "Could not mint a token automatically.\n\nRun:\n  \(TokenMinting.manualCommand)\n\nand paste it here.\n\n\(error.localizedDescription)"
-                connectionState = .unauthorized
-                return
-            }
-        }
-
-        guard let token else { return }
-
+        let token: String
         do {
-            _ = try await TokenMinting.verifyToken(token: token, endpoint: localEndpoint)
+            token = try await TokenMinting.loadOrMintToken(endpoint: localEndpoint).token
         } catch {
             needsOnboarding = true
             onboardingMessage =
-                "Saved token was rejected. Paste a fresh token from:\n  \(TokenMinting.manualCommand)\n\n\(error.localizedDescription)"
+                "Could not connect. Paste a token from:\n  \(TokenMinting.manualCommand)\n\n\(error.localizedDescription)"
             connectionState = .unauthorized
             return
         }
@@ -1552,14 +1535,27 @@ final class AgentStore {
     private func sendPromptResponse(
         _ command: DispatchCommand, requestId: String, thread: ScopedThreadID
     ) async -> Bool {
-        promptError = nil
+        let request = ScopedRequestID(thread: thread, requestID: requestId)
+        failedPromptResponses.remove(request)
         do {
             try await coordinator.dispatch(command, to: thread.environmentID)
             answeredRequestIds.insert(scopedRequestKey(requestId, thread: thread))
             return true
         } catch {
-            promptError = "T3 Code could not send the response. Try again or open the thread."
+            failedPromptResponses.insert(request)
             return false
+        }
+    }
+
+    func promptResponseFailed(_ requestID: String) -> Bool {
+        guard let thread = focusedScopedThread else { return false }
+        return failedPromptResponses.contains(ScopedRequestID(thread: thread, requestID: requestID))
+    }
+
+    var hasPromptDeliveryFailure: Bool {
+        guard let threadDetail else { return false }
+        return threadDetail.activities.contains {
+            $0.kind == "prompt.delivery.failed" && $0.turnId == threadDetail.latestTurn?.turnId
         }
     }
 
@@ -2099,6 +2095,7 @@ final class AgentStore {
     ) async {
         guard !isDemoRunning else { return }
         guard snapshot.thread.id == focusedThreadId else { return }
+        let alreadyShowingFailure = hasPromptDeliveryFailure
         threadDetail = snapshot.thread
         let activities = snapshot.thread.activities
         pendingApprovals = derivePendingApprovals(from: activities)
@@ -2127,7 +2124,7 @@ final class AgentStore {
             limit: settings.values.activityRows,
             relativeTo: workspaceRoot(for: snapshot.thread)
         )
-        recomputePresentation(userInitiated: false)
+        recomputePresentation(forceAttention: !alreadyShowingFailure && hasPromptDeliveryFailure)
     }
 
     /// Root that changed files are reported relative to. A thread on a worktree
@@ -2175,7 +2172,7 @@ final class AgentStore {
         }
 
         let active = activeThreads
-        let needsAttention = active.contains {
+        let needsAttention = hasPromptDeliveryFailure || active.contains {
             $0.hasPendingApprovals || $0.hasPendingUserInput
         }
 

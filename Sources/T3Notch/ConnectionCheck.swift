@@ -67,40 +67,12 @@ final class ConnectionCheck {
             set("reach", .passed("reachable, environment details unavailable"))
         }
 
-        // 3. Token: whatever is in the Keychain, else mint a fresh one.
         set("token", .running)
-        var token = KeychainStore.loadToken()
-        if token == nil {
-            do {
-                let minted = try await TokenMinting.mintToken()
-                try KeychainStore.saveToken(minted)
-                token = minted
-                set("token", .passed("minted a new token and saved it to the Keychain"))
-            } catch {
-                set(
-                    "token",
-                    .failed(
-                        "Could not mint one: \(error.localizedDescription)\n"
-                            + "Run: t3 auth session issue --token-only"
-                    )
-                )
-                failRemaining(after: "token")
-                return
-            }
-        }
-        guard let token else {
-            set("token", .failed("No token available"))
-            failRemaining(after: "token")
-            return
-        }
-
-        // 4. The token is only proven by a call that needs it.
         set("read", .running)
         do {
-            let shell = try await TokenMinting.verifyToken(token: token, endpoint: endpoint)
-            if case .running = outcome(of: "token") {
-                set("token", .passed("saved token accepted"))
-            }
+            let connection = try await TokenMinting.loadOrMintToken(endpoint: endpoint)
+            let shell = connection.shell
+            set("token", .passed(connection.reused ? "saved token accepted" : "verified a new token and saved it"))
             let projects = shell.projects.count
             let threads = shell.threads.count
             set(
@@ -118,7 +90,7 @@ final class ConnectionCheck {
             set(
                 "read",
                 .failed(
-                    "\(error.localizedDescription)\nRun: t3 auth session issue --token-only"
+                    "\(error.localizedDescription)\nRun: \(TokenMinting.manualCommand)"
                 )
             )
         }
@@ -134,10 +106,6 @@ final class ConnectionCheck {
             }
         }
         return nil
-    }
-
-    private func outcome(of id: String) -> Outcome {
-        steps.first { $0.id == id }?.outcome ?? .waiting
     }
 
     private func set(_ id: String, _ outcome: Outcome) {

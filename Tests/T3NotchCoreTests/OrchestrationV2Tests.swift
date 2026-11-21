@@ -22,21 +22,33 @@ struct OrchestrationV2Tests {
           "runs":[{"id":"run","ordinal":1,"status":"waiting"}],
           "runtimeRequests":[
             {"id":"question","kind":"user_input","status":"pending","createdAt":"2026-11-21T12:00:00Z"},
+            {"id":"sign-in","kind":"auth_refresh","status":"pending","createdAt":"2026-11-21T12:01:00Z"},
             {"id":"old","kind":"command","status":"resolved","createdAt":"2026-11-21T11:00:00Z"}
           ],
           "messages":[],
           "turnItems":[
             {"id":"question-item","type":"user_input_request","requestId":"question",
              "questions":[{"id":"confirm","header":"Confirm","question":"Proceed?","options":[]}]},
+            {"id":"running-tool","type":"command_execution","status":"running","input":"pwd",
+             "updatedAt":"2026-11-21T11:58:00Z"},
             {"id":"tool","type":"command_execution","status":"completed","input":"pwd",
-             "updatedAt":"2026-11-21T11:59:00Z"}
+             "updatedAt":"2026-11-21T11:59:00Z"},
+            {"id":"turn-item:runtime-request-delivery-failure:old","type":"error","runId":"run",
+             "updatedAt":"2026-11-21T12:02:00Z"}
           ]
         }}
         """.utf8)
         let detail = try JSONDecoder().decode(OrchestrationV2Detail.self, from: data).projection.detail
         #expect(derivePendingUserInputs(from: detail.activities).first?.questions.first?.id == "confirm")
         #expect(derivePendingApprovals(from: detail.activities).isEmpty)
-        #expect(deriveRecentActivity(from: detail.activities).first?.detail == "pwd")
+        let signIn = try #require(derivePendingUserInputs(from: detail.activities).first { $0.id == "sign-in" })
+        #expect(signIn.questions.first?.header == "Sign-in required")
+        #expect(signIn.questions.first?.options.isEmpty == true)
+        let events = deriveRecentActivity(from: detail.activities)
+        #expect(events.map(\.detail) == ["pwd", "pwd"])
+        #expect(events.map(\.isRunning) == [true, false])
+        let deliveryFailure = try #require(detail.activities.first { $0.kind == "prompt.delivery.failed" })
+        #expect(deliveryFailure.turnId == detail.latestTurn?.turnId)
     }
 
     @Test func answersUseTheRuntimeRequestCommand() throws {

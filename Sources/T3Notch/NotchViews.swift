@@ -193,6 +193,15 @@ private struct ExpandedBody: View {
                     )
                 }
 
+                if store.hasPromptDeliveryFailure, let thread = store.focusedThread {
+                    PromptCard {
+                        Text("Answer delivery not confirmed")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Open in T3 Code") { store.openInT3Code(thread) }
+                    }
+                }
+
                 if !store.pendingApprovals.isEmpty || !store.pendingUserInputs.isEmpty {
                     PromptCarousel(store: store)
                 }
@@ -920,6 +929,13 @@ private enum PromptSlide: Identifiable, Equatable {
     case approval(PendingApproval)
     case question(input: PendingUserInput, question: UserInputQuestion)
 
+    var requestID: String {
+        switch self {
+        case let .approval(approval): approval.requestId
+        case let .question(input, _): input.requestId
+        }
+    }
+
     var id: String {
         switch self {
         case let .approval(approval): "approval:\(approval.requestId)"
@@ -1012,10 +1028,13 @@ private struct PromptCarousel: View {
                     )
                 )
                 .animation(notchSpring, value: slide.id)
-                if let error = store.promptError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                if store.promptResponseFailed(slide.requestID) {
+                    PromptCard {
+                        Text("T3 Code could not send the response.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Open in T3 Code", action: openThread)
+                    }
                 }
             }
         }

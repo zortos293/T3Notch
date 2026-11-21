@@ -144,6 +144,14 @@ struct OrchestrationV2Detail: Decodable {
                 if request.kind == "user_input" {
                     kind = "user-input.requested"
                     payload["questions"] = item?["questions"]
+                } else if request.kind == "auth_refresh" {
+                    kind = "user-input.requested"
+                    payload["questions"] = .array([.object([
+                        "id": .string(request.id),
+                        "header": .string("Sign-in required"),
+                        "question": .string("Open T3 Code to finish signing in."),
+                        "options": .array([]),
+                    ])])
                 } else if request.isApproval {
                     kind = "approval.requested"
                     payload["requestKind"] = .string(request.kind)
@@ -174,6 +182,9 @@ struct OrchestrationV2Detail: Decodable {
             let kind: String
             let summary: String
             switch type {
+            case "error" where id.hasPrefix("turn-item:runtime-request-delivery-failure:"):
+                kind = "prompt.delivery.failed"
+                summary = "Answer delivery not confirmed"
             case "todo_list":
                 kind = "turn.plan.updated"
                 summary = "Updated plan"
@@ -186,6 +197,7 @@ struct OrchestrationV2Detail: Decodable {
                  "mcp_tool_call", "dynamic_tool_call", "image_view":
                 let running = ["pending", "running", "streaming"].contains(item["status"]?.stringValue ?? "")
                 kind = running ? "tool.started" : "tool.completed"
+                payload["isItemSnapshot"] = .bool(true)
                 let labels = [
                     "command_execution": "Ran command", "file_change": "Changed file",
                     "file_search": "Searched files", "web_search": "Searched the web",

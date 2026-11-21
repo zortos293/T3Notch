@@ -3,6 +3,21 @@ import Testing
 
 @Suite("TokenMinting")
 struct TokenMintingTests {
+    @Test func triesTheNextCLIWhenTheServerRejectsTheFirstToken() async throws {
+        let shell = ShellSnapshot(snapshotSequence: 4, projects: [], threads: [], updatedAt: "")
+        let result = try await TokenMinting.firstVerifiedToken(
+            from: [["bundled"], ["path"], ["npx"]],
+            mint: { $0[0] },
+            verify: { token in
+                if token == "bundled" { throw T3HTTPError.unauthorized }
+                #expect(token == "path")
+                return shell
+            }
+        )
+        #expect(result.token == "path")
+        #expect(result.shell == shell)
+    }
+
     @Test
     func preservesTheLoginShellPathAndRemovesDuplicates() {
         let path = TokenMinting.mergedCommandSearchPath(

@@ -386,7 +386,9 @@ public func deriveRecentActivity(
         let detail = toolActivityDetail(payload, relativeTo: root)
         let isCompletion = activity.kind == "tool.completed"
 
-        if isCompletion, let index = openRowIndex(in: rows, kind: kind, detail: detail) {
+        if isCompletion, payload?["isItemSnapshot"]?.boolValue != true,
+           let index = openRowIndex(in: rows, kind: kind, detail: detail)
+        {
             rows[index].label = label
             // Only a completion knows which files a change touched.
             rows[index].detail = detail ?? rows[index].detail
