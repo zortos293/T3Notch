@@ -1482,8 +1482,9 @@ final class AgentStore {
         recomputePresentation(userInitiated: false)
     }
 
-    func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) async -> Bool {
-        guard let scoped = focusedScopedThread else { return false }
+    func respondToApproval(
+        _ approval: PendingApproval, decision: ApprovalDecision, on scoped: ScopedThreadID
+    ) async -> Bool {
         if isDemoRunning {
             pendingApprovals.removeAll { $0.requestId == approval.requestId }
             finishDemoPrompt()
@@ -1505,8 +1506,9 @@ final class AgentStore {
         return true
     }
 
-    func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) async -> Bool {
-        guard let scoped = focusedScopedThread else { return false }
+    func respondToUserInput(
+        _ input: PendingUserInput, answers: [String: JSONValue], on scoped: ScopedThreadID
+    ) async -> Bool {
         if isDemoRunning {
             pendingUserInputs.removeAll { $0.requestId == input.requestId }
             finishDemoPrompt()

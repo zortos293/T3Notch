@@ -74,8 +74,21 @@ public enum TokenMinting {
         endpoint: ServerEndpoint,
         session: URLSession = .shared
     ) async throws -> ShellSnapshot {
+        struct SessionState: Decodable {
+            let authenticated: Bool?
+            let scopes: [String]?
+        }
         let client = T3HTTPClient(endpoint: endpoint, token: token, session: session)
-        return try await client.fetchShell()
+        let shell = try await client.fetchShell()
+        do {
+            let state: SessionState = try await client.get(path: "/api/auth/session")
+            guard state.authenticated != false,
+                  state.scopes?.contains("orchestration:operate") != false
+            else { throw T3HTTPError.unauthorized }
+        } catch T3HTTPError.httpStatus(404, _) {
+            // Older servers do not expose session scopes.
+        }
+        return shell
     }
 
     private static func runTokenCommand(

@@ -290,6 +290,7 @@ private struct ExpandedBody: View {
 
                 if !store.pendingApprovals.isEmpty || !store.pendingUserInputs.isEmpty {
                     PromptCarousel(store: store)
+                        .id(store.focusedThread?.id)
                 }
 
                 // Last, not first: what the agent did is what you look up for, and
@@ -992,6 +993,13 @@ private enum PromptSlide: Identifiable, Equatable {
     case approval(PendingApproval)
     case question(input: PendingUserInput, question: UserInputQuestion)
 
+    var requiresT3Code: Bool {
+        switch self {
+        case let .approval(approval): approval.requestKind == "mcp-elicitation"
+        case let .question(_, question): question.options.isEmpty
+        }
+    }
+
     var requestID: String {
         switch self {
         case let .approval(approval): approval.requestId
@@ -1019,6 +1027,7 @@ private struct PromptCarousel: View {
     @State private var drafts: [String: [String: JSONValue]] = [:]
     @State private var multiSelection: [String: Set<String>] = [:]
     @State private var submitting = false
+    @State private var selectedSlideID: String?
 
     private var slides: [PromptSlide] {
         store.pendingApprovals.map(PromptSlide.approval)
@@ -1028,7 +1037,12 @@ private struct PromptCarousel: View {
     }
 
     private var currentIndex: Int? {
-        slides.firstIndex { !answered.contains($0.id) }
+        if let selectedSlideID, let selected = slides.firstIndex(where: {
+            $0.id == selectedSlideID && !answered.contains($0.id)
+        }) {
+            return selected
+        }
+        return slides.firstIndex { !answered.contains($0.id) }
     }
 
     var body: some View {
@@ -1056,6 +1070,14 @@ private struct PromptCarousel: View {
                                 .foregroundStyle(.white.opacity(0.55))
                         }
                         .buttonStyle(.plain)
+                        .disabled(submitting)
+                    }
+                    if slide.requiresT3Code,
+                       let next = slides.dropFirst(index + 1).first(where: { !answered.contains($0.id) })
+                    {
+                        Button("Next") { selectedSlideID = next.id }
+                            .buttonStyle(.plain)
+                            .disabled(submitting)
                     }
                 }
 
@@ -1065,7 +1087,10 @@ private struct PromptCarousel: View {
                         ApprovalSlide(
                             approval: approval,
                             onDecision: { decision in
-                                submit(slide) { await store.respondToApproval(approval, decision: decision) }
+                                guard let thread = store.focusedScopedThread else { return }
+                                submit(slide, on: thread) {
+                                    await store.respondToApproval(approval, decision: decision, on: thread)
+                                }
                             },
                             onOpen: openThread
                         )
@@ -1076,7 +1101,10 @@ private struct PromptCarousel: View {
                             isLast: index == slides.count - 1,
                             onToggle: { value in toggle(question: question, label: value) },
                             onAnswer: { answer in
-                                submit(slide) { await record(answer, for: question, in: input) }
+                                guard let thread = store.focusedScopedThread else { return }
+                                submit(slide, on: thread) {
+                                    await record(answer, for: question, in: input, on: thread)
+                                }
                             },
                             onOpen: openThread
                         )
@@ -1122,7 +1150,8 @@ private struct PromptCarousel: View {
     private func record(
         _ answer: JSONValue,
         for question: UserInputQuestion,
-        in input: PendingUserInput
+        in input: PendingUserInput,
+        on thread: ScopedThreadID
     ) async -> Bool {
         var requestAnswers = drafts[input.requestId] ?? [:]
         requestAnswers[question.id] = answer
@@ -1131,17 +1160,19 @@ private struct PromptCarousel: View {
         // A request is only dispatched once every one of its questions is answered.
         let allAnswered = input.questions.allSatisfy { requestAnswers[$0.id] != nil }
         guard allAnswered else { return true }
-        guard await store.respondToUserInput(input, answers: requestAnswers) else { return false }
+        guard await store.respondToUserInput(input, answers: requestAnswers, on: thread) else { return false }
         drafts[input.requestId] = nil
         return true
     }
 
-    private func submit(_ slide: PromptSlide, action: @escaping @MainActor () async -> Bool) {
+    private func submit(
+        _ slide: PromptSlide, on thread: ScopedThreadID, action: @escaping @MainActor () async -> Bool
+    ) {
         guard !submitting else { return }
         submitting = true
         Task {
             defer { submitting = false }
-            if await action() { advance(past: slide) }
+            if await action(), store.focusedScopedThread == thread { advance(past: slide) }
         }
     }
 
@@ -1153,6 +1184,7 @@ private struct PromptCarousel: View {
 
     private func goBack(from index: Int) {
         let previous = slides[index - 1]
+        selectedSlideID = previous.id
         withAnimation(notchSpring) {
             _ = answered.remove(previous.id)
         }

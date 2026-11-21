@@ -86,7 +86,8 @@ public actor T3HTTPClient {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
-    private var usesOrchestrationV2 = false
+    private var endpointGeneration = 0
+    private var usesOrchestrationV2: Bool?
 
     public init(
         endpoint: ServerEndpoint,
@@ -116,11 +117,12 @@ public actor T3HTTPClient {
     public func update(endpoint: ServerEndpoint, authorizer: any HTTPAuthorizer) {
         self.endpoint = endpoint
         self.authorizer = authorizer
+        endpointGeneration += 1
+        usesOrchestrationV2 = nil
     }
 
     public func update(endpoint: ServerEndpoint, token: String) {
-        self.endpoint = endpoint
-        self.authorizer = BearerHTTPAuthorizer(token: token)
+        update(endpoint: endpoint, authorizer: BearerHTTPAuthorizer(token: token))
     }
 
     public func fetchEnvironment() async throws -> EnvironmentDescriptor {
@@ -156,7 +158,9 @@ public actor T3HTTPClient {
     }
 
     public func fetchShell() async throws -> ShellSnapshot {
+        let generation = endpointGeneration
         let response: ShellResponse = try await get(path: "/api/orchestration/shell")
+        guard generation == endpointGeneration else { throw CancellationError() }
         usesOrchestrationV2 = response.isV2
         return response.snapshot
     }
@@ -168,18 +172,30 @@ public actor T3HTTPClient {
     }
 
     public func dispatch(_ command: DispatchCommand) async throws -> DispatchResult {
-        if usesOrchestrationV2 {
-            return try await dispatchV2(command)
+        let generation = endpointGeneration
+        if usesOrchestrationV2 == nil {
+            _ = try await fetchShell()
         }
-        return try await post(path: "/api/orchestration/dispatch", body: command)
+        guard generation == endpointGeneration else { throw CancellationError() }
+        if usesOrchestrationV2 == true {
+            return try await dispatchV2(command, generation: generation)
+        }
+        let request = try await makeRequest(
+            path: "/api/orchestration/dispatch", method: "POST", body: encoder.encode(command)
+        )
+        guard generation == endpointGeneration else { throw CancellationError() }
+        let result: DispatchResult = try await perform(request)
+        guard result.accepted != false, result.ok != false else { throw T3HTTPError.dispatchRejected }
+        return result
     }
 
-    private func dispatchV2(_ command: DispatchCommand) async throws -> DispatchResult {
+    private func dispatchV2(_ command: DispatchCommand, generation: Int) async throws -> DispatchResult {
         struct Ticket: Decodable { let ticket: String }
         let frame = try OrchestrationV2CommandFrame(command: command)
         let endpointURL = endpoint.baseURL
         let request = try await makeRequest(path: "/api/auth/websocket-ticket", method: "POST", body: nil)
         let ticket: Ticket = try await perform(request)
+        guard generation == endpointGeneration else { throw CancellationError() }
         guard var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: true) else {
             throw T3HTTPError.invalidURL
         }
