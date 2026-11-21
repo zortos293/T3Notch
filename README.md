@@ -109,9 +109,10 @@ open dist/T3Notch.app
 `xcode-select` may point at the Command Line Tools, which cannot build a SwiftUI
 app bundle — pin `DEVELOPER_DIR` as above.
 
-For a token, T3Notch tries the Keychain, then `t3 auth session issue --token-only`,
-then `npx -y t3@latest auth session issue --token-only`. If all three fail you can
-paste a bearer token into the panel. Tokens live in the Keychain under
+For a token, T3Notch checks the Keychain, then tries the CLI bundled with T3 Code.
+If that fails, it tries `t3` from PATH and then `npx -y t3@latest`. It requests the
+`orchestration:read` and `orchestration:operate` scopes. You can also paste a
+bearer token into the panel. Tokens live in the Keychain under
 `gg.t3tools.t3notch`, and a saved one is dropped unread when the build that wrote it
 is not the build reading it — otherwise every update would open the Keychain's
 password prompt, which costs more than minting a fresh token does.
@@ -318,23 +319,17 @@ relative to the worktree.
 
 ### Finished agents
 
-A finished agent stays pinned as a Done card until it is reviewed, rather than
-flashing past. Its review bar sits at the foot of the panel, under what the agent
-actually did. Two things clear it: pressing **Open in T3 Code** in the notch, or
-settling the thread in T3 Code (`settledAt`). T3 Code's own read state lives in
-renderer `localStorage` (`threadLastVisitedAtById`) and is not exposed over HTTP,
-so simply opening the thread in the T3 Code window cannot clear the notch. Threads
-that had already finished when the notch launched are treated as seen, so the first
-snapshot does not pin all of history.
+The collapsed notch shows up to two working thread names at a time, with a blue
+indicator beside each name. When more threads are working, the names rotate
+every four seconds. Expand the notch to see the cards and details.
 
-**Open in T3 Code** brings the desktop app forward when it is running and only
-falls back to a browser tab when it is not. T3 Code registers `t3code://` but
-handles no thread routes — a second instance just reveals the existing window — so
-the app lands on whatever thread it was already showing rather than the one from
-the notch. Activation goes through LaunchServices (`NSWorkspace.openApplication`),
-because `NSRunningApplication.activate()` is ignored for a caller that is not
-itself active, which the non-activating notch panel never is. Turn **Open in the T3
-Code app** off to always use the browser, which does deep-link to the exact thread.
+A newly finished agent gets a short banner. Its Done card stays until you open
+or dismiss it, settle the thread, or view the result in T3 Code. For local
+threads, a visit recorded while T3 Code is in the background leaves the result
+visible in the notch. Threads that finished before launch start out as seen.
+
+Click a Done card or **Open in T3 Code** to open the exact local thread in the
+desktop app. Turn off **Open in the T3 Code app** to use the browser.
 
 ### Detecting merges
 

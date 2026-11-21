@@ -24,6 +24,8 @@ final class AgentStore {
     }
 
     var connectionState: ConnectionState = .connecting
+    private var failedPromptResponses: Set<ScopedRequestID> = []
+    private var inFlightPromptResponses: Set<ScopedRequestID> = []
     var projects: [ProjectShell] = []
     var threads: [ThreadShell] = []
     var focusedThreadId: String?
@@ -79,6 +81,7 @@ final class AgentStore {
     private var scopedThreads: [String: ScopedThreadID] = [:]
     private var scopedProjects: [String: ScopedProjectID] = [:]
     private var localEnvironmentID: EnvironmentID?
+    private var desktopForegroundSince: Date?
     private var dpopSigner: DPoPSigner?
     private var t3ConnectClient: T3ConnectClient?
     private var t3ConnectConfiguration: T3ConnectConfiguration?
@@ -138,7 +141,7 @@ final class AgentStore {
         return threads.compactMap { thread -> (ThreadShell, AgentAwarenessPhase)? in
             guard let phase = resolveThreadAwarenessPhase(thread) else { return nil }
             switch phase {
-            case .running, .starting, .waitingForApproval, .waitingForInput, .failed:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput, .failed:
                 return (thread, phase)
             case .completed:
                 // A finished agent stays pinned until it has been reviewed in
@@ -161,6 +164,7 @@ final class AgentStore {
         guard settings.values.keepFinishedUntilReviewed else { return false }
         guard resolveThreadAwarenessPhase(thread) == .completed else { return false }
         guard thread.settledAt == nil else { return false }
+        if environmentID(for: thread) != localEnvironmentID, thread.hasSeenCompletion { return false }
         return !reviewStore.contains(completionKey(for: thread))
     }
 
@@ -171,10 +175,13 @@ final class AgentStore {
     /// Identifies one completion, so a fresh run after a review surfaces again
     /// while a mere `updatedAt` bump does not. Keyed on the turn id rather than
     /// `completedAt`, whose second granularity can collide across turns.
-    private func completionKey(for thread: ThreadShell) -> String {
+    private func completionKey(for thread: ThreadShell, in environmentID: EnvironmentID? = nil) -> String {
         let turn = thread.latestTurn
         let marker = turn?.turnId ?? turn?.completedAt ?? "idle"
-        return "\(thread.id):\(marker)"
+        let threadID = environmentID.map {
+            ScopedThreadID(environmentID: $0, threadID: thread.id).storageKey
+        } ?? thread.id
+        return "\(threadID):\(marker)"
     }
 
     /// Marks a finished agent as seen and drops it from the notch.
@@ -340,37 +347,30 @@ final class AgentStore {
         recomputePresentation(userInitiated: false)
     }
 
-    /// Opens the thread in T3 Code's own UI, which is what "reviewed" means here.
-    ///
-    /// The desktop app is preferred when it is already running: T3 Code registers
-    /// `t3code://` but only ever reveals its window on a second instance, so there
-    /// is no deep link to a single thread. Bringing it forward beats opening a
-    /// duplicate of the same thread in a browser tab.
+    /// Leave a finished card unread until its thread has been opened.
     func openInT3Code(_ thread: ThreadShell) {
-        guard let scoped = scopedThreads[thread.id],
-              let snapshot = snapshotsByEnvironment[scoped.environmentID]
-        else {
-            markReviewed(thread)
+        let finished = resolveThreadAwarenessPhase(thread) == .completed
+        if isDemoRunning {
+            if finished { markReviewed(thread) }
             return
         }
+        guard let scoped = scopedThreads[thread.id],
+              let snapshot = snapshotsByEnvironment[scoped.environmentID]
+        else { return }
+
         if snapshot.activeAccessPath == .local,
            settings.values.openInDesktopApp,
-           T3CodeApp.activate()
+           NSWorkspace.shared.open(scoped.desktopURL)
         {
-            markReviewed(thread)
+            if finished { markReviewed(thread) }
             return
         }
         let baseURL = snapshot.activeAccessPath == .t3Connect
             ? URL(string: "https://app.t3.codes/")!
             : snapshot.profile.directEndpoint?.baseURL ?? endpoint.baseURL
-        if let environmentId = snapshot.descriptor?.environmentId,
-           let url = URL(
-               string: "/threads/\(environmentId)/\(scoped.threadID)",
-               relativeTo: baseURL
-           ) {
-            NSWorkspace.shared.open(url)
+        if NSWorkspace.shared.open(scoped.webURL(baseURL: baseURL)) {
+            if finished { markReviewed(thread) }
         }
-        markReviewed(thread)
     }
 
     var focusedPhase: AgentAwarenessPhase? {
@@ -452,7 +452,8 @@ final class AgentStore {
     }
 
     func elapsedLabel(for thread: ThreadShell) -> String? {
-        guard let start = turnStart(of: thread) else { return nil }
+        guard resolveThreadAwarenessPhase(thread) != .waitingForSubagents,
+              let start = turnStart(of: thread) else { return nil }
         // A finished turn's duration is fixed; only a live one counts up.
         let end = thread.latestTurn?.completedAt.flatMap(ISO8601Parsing.date(from:)) ?? clock
         let seconds = max(0, Int(end.timeIntervalSince(start)))
@@ -534,6 +535,8 @@ final class AgentStore {
         switch phase {
         case .running, .starting:
             return "Working since \(startedAtLabel)\(duration)"
+        case .waitingForSubagents:
+            return nil
         case .waitingForApproval, .waitingForInput:
             return "Waiting since \(startedAtLabel)\(duration)"
         case .failed:
@@ -552,30 +555,13 @@ final class AgentStore {
     func start() async {
         let localEndpoint = await ServerDiscovery.resolveEndpoint()
         self.endpoint = localEndpoint
-        var token = KeychainStore.loadToken()
-
-        if token == nil {
-            do {
-                let minted = try await TokenMinting.mintToken()
-                try KeychainStore.saveToken(minted)
-                token = minted
-            } catch {
-                needsOnboarding = true
-                onboardingMessage =
-                    "Could not mint a token automatically.\n\nRun:\n  npx -y t3@latest auth session issue --token-only\n\nand paste it here.\n\n\(error.localizedDescription)"
-                connectionState = .unauthorized
-                return
-            }
-        }
-
-        guard let token else { return }
-
+        let token: String
         do {
-            _ = try await TokenMinting.verifyToken(token: token, endpoint: localEndpoint)
+            token = try await TokenMinting.loadOrMintToken(endpoint: localEndpoint).token
         } catch {
             needsOnboarding = true
             onboardingMessage =
-                "Saved token was rejected. Paste a fresh token from:\n  npx -y t3@latest auth session issue --token-only\n\n\(error.localizedDescription)"
+                "Could not connect. Paste a token from:\n  \(TokenMinting.manualCommand)\n\n\(error.localizedDescription)"
             connectionState = .unauthorized
             return
         }
@@ -1502,15 +1488,15 @@ final class AgentStore {
         recomputePresentation(userInitiated: false)
     }
 
-    func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) {
-        guard let scoped = focusedScopedThread else { return }
+    func respondToApproval(
+        _ approval: PendingApproval, decision: ApprovalDecision, on scoped: ScopedThreadID?
+    ) async -> Bool {
         if isDemoRunning {
             pendingApprovals.removeAll { $0.requestId == approval.requestId }
             finishDemoPrompt()
-            return
+            return true
         }
-        answeredRequestIds.insert(scopedRequestKey(approval.requestId, thread: scoped))
-        pendingApprovals.removeAll { $0.requestId == approval.requestId }
+        guard let scoped else { return false }
         let command = DispatchCommand.approvalRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,
@@ -1518,20 +1504,24 @@ final class AgentStore {
             decision: decision,
             createdAt: ISO8601Parsing.nowString()
         )
-        Task {
-            try? await coordinator.dispatch(command, to: scoped.environmentID)
+        guard await sendPromptResponse(command, requestId: approval.requestId, thread: scoped) else {
+            return false
         }
+        if focusedScopedThread == scoped {
+            pendingApprovals.removeAll { $0.requestId == approval.requestId }
+        }
+        return true
     }
 
-    func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) {
-        guard let scoped = focusedScopedThread else { return }
+    func respondToUserInput(
+        _ input: PendingUserInput, answers: [String: JSONValue], on scoped: ScopedThreadID?
+    ) async -> Bool {
         if isDemoRunning {
             pendingUserInputs.removeAll { $0.requestId == input.requestId }
             finishDemoPrompt()
-            return
+            return true
         }
-        answeredRequestIds.insert(scopedRequestKey(input.requestId, thread: scoped))
-        pendingUserInputs.removeAll { $0.requestId == input.requestId }
+        guard let scoped else { return false }
         let command = DispatchCommand.userInputRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,
@@ -1539,8 +1529,42 @@ final class AgentStore {
             answers: answers,
             createdAt: ISO8601Parsing.nowString()
         )
-        Task {
-            try? await coordinator.dispatch(command, to: scoped.environmentID)
+        guard await sendPromptResponse(command, requestId: input.requestId, thread: scoped) else {
+            return false
+        }
+        if focusedScopedThread == scoped {
+            pendingUserInputs.removeAll { $0.requestId == input.requestId }
+        }
+        return true
+    }
+
+    private func sendPromptResponse(
+        _ command: DispatchCommand, requestId: String, thread: ScopedThreadID
+    ) async -> Bool {
+        let request = ScopedRequestID(thread: thread, requestID: requestId)
+        let key = scopedRequestKey(requestId, thread: thread)
+        guard !answeredRequestIds.contains(key), inFlightPromptResponses.insert(request).inserted else { return false }
+        defer { inFlightPromptResponses.remove(request) }
+        failedPromptResponses.remove(request)
+        do {
+            try await coordinator.dispatch(command, to: thread.environmentID)
+            answeredRequestIds.insert(key)
+            return true
+        } catch {
+            failedPromptResponses.insert(request)
+            return false
+        }
+    }
+
+    func promptResponseFailed(_ requestID: String) -> Bool {
+        guard let thread = focusedScopedThread else { return false }
+        return failedPromptResponses.contains(ScopedRequestID(thread: thread, requestID: requestID))
+    }
+
+    var hasPromptDeliveryFailure: Bool {
+        guard let threadDetail else { return false }
+        return threadDetail.activities.contains {
+            $0.kind == "prompt.delivery.failed" && $0.turnId == threadDetail.latestTurn?.turnId
         }
     }
 
@@ -1572,10 +1596,8 @@ final class AgentStore {
     private func applyEnvironmentEvent(_ event: EnvironmentEvent) async {
         switch event {
         case let .snapshot(snapshot):
-            retainRemoteCompletionTransition(
-                from: snapshotsByEnvironment[snapshot.profile.environmentID],
-                to: snapshot
-            )
+            let previous = snapshotsByEnvironment[snapshot.profile.environmentID]
+            retainRemoteCompletionTransition(from: previous, to: snapshot)
             snapshotsByEnvironment[snapshot.profile.environmentID] = snapshot
             if snapshot.profile.source == .local {
                 connectionState = legacyConnectionState(snapshot.connectionState)
@@ -1594,6 +1616,25 @@ final class AgentStore {
                 }
             }
             rebuildFlattenedWorld()
+            if let current = snapshot.shell {
+                let environmentID = snapshot.profile.environmentID
+                let isLocal = snapshot.activeAccessPath == .local
+                if isLocal, !isDemoRunning, let earlier = previous?.shell, let foregroundSince = desktopForegroundSince {
+                    recordLocalCompletionVisits(
+                        in: current, since: earlier, environmentID: environmentID, foregroundSince: foregroundSince
+                    )
+                }
+                removeSeenCompletionBanners(in: current, environmentID: environmentID, isLocal: isLocal)
+                if !isDemoRunning, let earlier = previous?.shell {
+                    for thread in newlyFinishedThreads(from: earlier, to: current) {
+                        guard let turnID = thread.latestTurn?.turnId,
+                              !completionWasReviewed(thread, environmentID: environmentID, isLocal: isLocal)
+                        else { continue }
+                        let scoped = ScopedThreadID(environmentID: environmentID, threadID: thread.id)
+                        celebrate(.agentFinished(thread: scoped, turnID: turnID, threadTitle: thread.title))
+                    }
+                }
+            }
             await applyCombinedShell(changedEnvironment: snapshot.profile.environmentID)
         case let .detail(scoped, detail):
             await applyScopedDetail(detail, scoped: scoped)
@@ -1648,7 +1689,7 @@ final class AgentStore {
                 } else {
                     retained[thread.id] = nil
                 }
-            case .running, .starting, .waitingForApproval, .waitingForInput:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
                 retained[thread.id] = nil
             default:
                 if let prior = previousByID[thread.id],
@@ -1674,7 +1715,7 @@ final class AgentStore {
             switch resolveThreadAwarenessPhase(thread) {
             case .completed:
                 completion = thread
-            case .running, .starting, .waitingForApproval, .waitingForInput:
+            case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
                 completion = completedCopy(
                     of: thread,
                     at: incomingShell.updatedAt,
@@ -1695,7 +1736,7 @@ final class AgentStore {
 
     private func isActiveWork(_ phase: AgentAwarenessPhase?) -> Bool {
         switch phase {
-        case .running, .starting, .waitingForApproval, .waitingForInput:
+        case .running, .starting, .waitingForSubagents, .waitingForApproval, .waitingForInput:
             true
         default:
             false
@@ -1737,7 +1778,7 @@ final class AgentStore {
         _ rawThread: ThreadShell,
         environmentID: EnvironmentID
     ) -> Bool {
-        guard rawThread.archivedAt == nil else { return false }
+        guard rawThread.archivedAt == nil, !rawThread.hasSeenCompletion else { return false }
         var scopedThread = rawThread
         scopedThread.id = ScopedThreadID(
             environmentID: environmentID,
@@ -2028,6 +2069,60 @@ final class AgentStore {
         }
     }
 
+    func noteDesktopActivation(_ bundleID: String?) {
+        let t3BundleIDs = ["com.t3tools.t3code", "com.t3tools.t3code-dev", "com.t3tools.t3code.dev"]
+        if let bundleID, t3BundleIDs.contains(bundleID) {
+            desktopForegroundSince = desktopForegroundSince ?? .now
+        } else {
+            desktopForegroundSince = nil
+        }
+    }
+
+    private func recordLocalCompletionVisits(
+        in current: ShellSnapshot, since previous: ShellSnapshot, environmentID: EnvironmentID, foregroundSince: Date
+    ) {
+        // T3 Code's visit tracker can advance while its window is in the background.
+        let prior = Dictionary(previous.threads.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        let mostRecentOpen = current.threads.compactMap(\.lastOpenedAtMilliseconds).max()
+        for thread in current.threads where resolveThreadAwarenessPhase(thread) == .completed {
+            guard thread.hasNewForegroundCompletionVisit(
+                since: prior[thread.id], foregroundSince: foregroundSince, mostRecentOpenMilliseconds: mostRecentOpen
+            ) else { continue }
+            let key = completionKey(for: thread, in: environmentID)
+            if !reviewStore.contains(key) {
+                reviewStore.insert(key)
+                reviewRevision &+= 1
+            }
+        }
+    }
+
+    private func completionWasReviewed(
+        _ thread: ThreadShell, environmentID: EnvironmentID, isLocal: Bool
+    ) -> Bool {
+        (!isLocal && thread.hasSeenCompletion) || reviewStore.contains(completionKey(for: thread, in: environmentID))
+    }
+
+    private func removeSeenCompletionBanners(
+        in shell: ShellSnapshot, environmentID: EnvironmentID, isLocal: Bool
+    ) {
+        func hasBeenSeen(_ milestone: Milestone) -> Bool {
+            guard case let .agentFinished(thread, turnID, _) = milestone,
+                  thread.environmentID == environmentID,
+                  let current = shell.threads.first(where: { $0.id == thread.threadID })
+            else { return false }
+            return current.latestTurn?.turnId == turnID
+                && completionWasReviewed(current, environmentID: environmentID, isLocal: isLocal)
+        }
+
+        milestoneQueue.removeAll(where: hasBeenSeen)
+        guard let milestone = celebration?.milestone, hasBeenSeen(milestone) else { return }
+        celebrationTask?.cancel()
+        celebration = nil
+        if !milestoneQueue.isEmpty {
+            show(milestoneQueue.removeFirst())
+        }
+    }
+
     func dismissCelebration() {
         celebrationTask?.cancel()
         celebrationTask = nil
@@ -2061,7 +2156,7 @@ final class AgentStore {
         syncClock()
         celebrationTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(milestone.duration))
-            guard let self, self.celebrationToken == token else { return }
+            guard !Task.isCancelled, let self, self.celebrationToken == token else { return }
             self.celebration = nil
             guard !self.milestoneQueue.isEmpty else {
                 self.recomputePresentation(userInitiated: false)
@@ -2069,7 +2164,11 @@ final class AgentStore {
             }
             // A beat of empty panel, so the next banner reads as a new event.
             try? await Task.sleep(for: .milliseconds(280))
-            guard self.celebrationToken == token else { return }
+            guard !Task.isCancelled, self.celebrationToken == token else { return }
+            guard !self.milestoneQueue.isEmpty else {
+                self.recomputePresentation(userInitiated: false)
+                return
+            }
             self.show(self.milestoneQueue.removeFirst())
         }
     }
@@ -2080,6 +2179,7 @@ final class AgentStore {
     ) async {
         guard !isDemoRunning else { return }
         guard snapshot.thread.id == focusedThreadId else { return }
+        let alreadyShowingFailure = hasPromptDeliveryFailure
         threadDetail = snapshot.thread
         let activities = snapshot.thread.activities
         pendingApprovals = derivePendingApprovals(from: activities)
@@ -2108,7 +2208,7 @@ final class AgentStore {
             limit: settings.values.activityRows,
             relativeTo: workspaceRoot(for: snapshot.thread)
         )
-        recomputePresentation(userInitiated: false)
+        recomputePresentation(forceAttention: !alreadyShowingFailure && hasPromptDeliveryFailure)
     }
 
     /// Root that changed files are reported relative to. A thread on a worktree
@@ -2156,7 +2256,7 @@ final class AgentStore {
         }
 
         let active = activeThreads
-        let needsAttention = active.contains {
+        let needsAttention = hasPromptDeliveryFailure || active.contains {
             $0.hasPendingApprovals || $0.hasPendingUserInput
         }
 
@@ -2217,6 +2317,7 @@ final class AgentStore {
         case .waitingForInput: return 40
         case .failed: return 30
         case .running: return 20
+        case .waitingForSubagents: return 15
         case .starting: return 10
         case .completed: return 5
         case .stale: return 0
@@ -2255,18 +2356,5 @@ extension String {
     var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
-enum ISO8601Parsing {
-    static func date(from string: String) -> Date? {
-        if let date = try? Date(string, strategy: .iso8601.year().month().day().time(includingFractionalSeconds: true)) {
-            return date
-        }
-        return try? Date(string, strategy: .iso8601)
-    }
-
-    static func nowString() -> String {
-        Date.now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: true))
     }
 }

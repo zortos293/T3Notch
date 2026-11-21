@@ -1,12 +1,16 @@
 import SwiftUI
+import T3NotchCore
 
 /// Something worth a moment of celebration in the notch.
 enum Milestone: Equatable, Sendable {
+    case agentFinished(thread: ScopedThreadID, turnID: String, threadTitle: String)
     case tasksComplete(count: Int)
     case branchMerged(branch: String, into: String)
 
     var headline: String {
         switch self {
+        case .agentFinished:
+            "Agent finished"
         case let .tasksComplete(count):
             count == 1 ? "Task complete" : "All \(count) tasks complete"
         case .branchMerged:
@@ -16,6 +20,8 @@ enum Milestone: Equatable, Sendable {
 
     var detail: String? {
         switch self {
+        case let .agentFinished(_, _, threadTitle):
+            threadTitle
         case .tasksComplete:
             nil
         case let .branchMerged(branch, into):
@@ -25,14 +31,14 @@ enum Milestone: Equatable, Sendable {
 
     var symbol: String {
         switch self {
-        case .tasksComplete: "checkmark.seal.fill"
+        case .agentFinished, .tasksComplete: "checkmark.seal.fill"
         case .branchMerged: "arrow.triangle.merge"
         }
     }
 
     var tint: Color {
         switch self {
-        case .tasksComplete: Color(red: 0.42, green: 0.95, blue: 0.55)
+        case .agentFinished, .tasksComplete: Color(red: 0.42, green: 0.95, blue: 0.55)
         case .branchMerged: Color(red: 0.66, green: 0.55, blue: 1.0)
         }
     }
@@ -40,6 +46,7 @@ enum Milestone: Equatable, Sendable {
     /// How long the banner stays up. A merge is rarer, so it lingers.
     var duration: Double {
         switch self {
+        case .agentFinished: 4
         case .tasksComplete: 2.6
         case .branchMerged: 4.5
         }
@@ -49,7 +56,7 @@ enum Milestone: Equatable, Sendable {
     /// wear out its welcome.
     var showsConfetti: Bool {
         switch self {
-        case .tasksComplete: false
+        case .agentFinished, .tasksComplete: false
         case .branchMerged: true
         }
     }

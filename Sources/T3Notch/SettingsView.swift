@@ -44,7 +44,7 @@ struct SettingsView: View {
 
                 SettingsCard("Milestones") {
                     SettingsToggle(
-                        "Celebrate finished tasks and merges",
+                        "Celebrate completions and merges",
                         detail: "Banner, tick animation, and the panel opening for a few seconds.",
                         isOn: settings.binding(\.celebrateMilestones)
                     )
@@ -220,10 +220,7 @@ struct SettingsView: View {
     }
 
     private var desktopAppDetail: String {
-        let base =
-            "“Open in T3 Code” brings the desktop app forward instead of opening a browser tab. "
-            + "T3 Code has no deep link to a single thread, so it lands on whatever it was showing."
-        return T3CodeApp.isRunning ? base : base + " Not running right now, so the browser is used."
+        "Opens local threads directly in the T3 Code desktop app when available."
     }
 
     private var header: some View {

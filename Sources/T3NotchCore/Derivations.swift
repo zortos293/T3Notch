@@ -5,6 +5,7 @@ import Foundation
 public enum AgentAwarenessPhase: String, Sendable, Equatable, CaseIterable {
     case starting
     case running
+    case waitingForSubagents = "waiting_for_subagents"
     case waitingForApproval = "waiting_for_approval"
     case waitingForInput = "waiting_for_input"
     case completed
@@ -23,20 +24,23 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     if thread.session?.status == "error" || thread.latestTurn?.state == "error" {
         return .failed
     }
+    if thread.session?.status == AgentAwarenessPhase.waitingForSubagents.rawValue {
+        return .waitingForSubagents
+    }
     if thread.session?.status == "starting" {
         return .starting
     }
     if thread.session?.status == "running" || thread.latestTurn?.state == "running" {
         return .running
     }
-    if thread.latestTurn?.state == "completed" {
+    if isSuccessfulCompletion(thread)
+        || (thread.usesOrchestrationV2 != true && thread.latestTurn?.state == "interrupted"
+            && thread.latestTurn?.completedAt != nil)
+    {
         return .completed
     }
-    // A turn that finished can still read as "interrupted" here: session
-    // teardown settles still-running turns by session status, and that write
-    // can race the turn.completed one. completedAt survives the race.
-    if thread.latestTurn?.state == "interrupted", thread.latestTurn?.completedAt != nil {
-        return .completed
+    if let state = thread.latestTurn?.state, ["interrupted", "cancelled", "rolled_back"].contains(state) {
+        return nil
     }
     if thread.session?.status == "ready"
         || thread.session?.status == "idle"
@@ -45,6 +49,43 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
         return .completed
     }
     return nil
+}
+
+private func isSuccessfulCompletion(_ thread: ThreadShell) -> Bool {
+    guard let turn = thread.latestTurn else { return false }
+    if turn.state == "completed" { return true }
+    // A legacy teardown can preserve the final assistant message and completion time.
+    return thread.usesOrchestrationV2 != true && turn.state == "interrupted"
+        && turn.completedAt != nil && turn.assistantMessageId != nil
+        && ["ready", "idle", "stopped"].contains(thread.session?.status ?? "")
+}
+
+/// Successful runs that completed between two snapshots, including short runs
+/// that finished before the next poll could see them working.
+public func newlyFinishedThreads(from previous: ShellSnapshot, to current: ShellSnapshot) -> [ThreadShell] {
+    let priorThreads = Dictionary(
+        previous.threads.map { ($0.id, $0) },
+        uniquingKeysWith: { _, latest in latest }
+    )
+    let previousUpdate = previous.observedAt ?? ISO8601Parsing.date(from: previous.updatedAt)
+    return current.threads.filter { thread in
+        guard thread.archivedAt == nil,
+              let turn = thread.latestTurn,
+              isSuccessfulCompletion(thread),
+              resolveThreadAwarenessPhase(thread) == .completed
+        else { return false }
+
+        if let prior = priorThreads[thread.id] {
+            return prior.latestTurn?.turnId != turn.turnId
+                || !isSuccessfulCompletion(prior)
+                || resolveThreadAwarenessPhase(prior) != .completed
+        }
+        // A previously hidden historical thread can reappear in a snapshot.
+        guard let previousUpdate, let completedAt = turn.completedAt.flatMap(ISO8601Parsing.date(from:)) else {
+            return false
+        }
+        return completedAt > previousUpdate
+    }
 }
 
 /// Keep the current card only while it remains active. Otherwise move to the
@@ -63,6 +104,7 @@ public func headline(for phase: AgentAwarenessPhase) -> String {
     switch phase {
     case .starting: return "Starting"
     case .running: return "Working"
+    case .waitingForSubagents: return "Waiting on subagents"
     case .waitingForApproval: return "Needs approval"
     case .waitingForInput: return "Needs input"
     case .completed: return "Done"
@@ -89,13 +131,15 @@ public struct PendingApproval: Sendable, Equatable, Identifiable {
 }
 
 public struct UserInputOption: Sendable, Equatable, Identifiable {
-    public var id: String { label }
+    public var id: [String] { [label, value] }
     public var label: String
     public var description: String
+    public var value: String
 
-    public init(label: String, description: String) {
+    public init(label: String, description: String, value: String? = nil) {
         self.label = label
         self.description = description
+        self.value = value ?? label
     }
 }
 
@@ -384,7 +428,9 @@ public func deriveRecentActivity(
         let detail = toolActivityDetail(payload, relativeTo: root)
         let isCompletion = activity.kind == "tool.completed"
 
-        if isCompletion, let index = openRowIndex(in: rows, kind: kind, detail: detail) {
+        if isCompletion, payload?["isItemSnapshot"]?.boolValue != true,
+           let index = openRowIndex(in: rows, kind: kind, detail: detail)
+        {
             rows[index].label = label
             // Only a completion knows which files a change touched.
             rows[index].detail = detail ?? rows[index].detail
@@ -551,7 +597,7 @@ private func lifecycleRank(_ kind: String) -> Int {
 
 func normalizedRequestKind(_ value: String) -> String? {
     switch value {
-    case "command", "file-read", "file-change":
+    case "command", "file-read", "file-change", "permission", "mcp-elicitation":
         return value
     default:
         return nil
@@ -598,9 +644,10 @@ func parseUserInputQuestions(_ payload: [String: JSONValue]?) -> [UserInputQuest
                   let label = option["label"]?.stringValue,
                   let description = option["description"]?.stringValue
             else { continue }
-            options.append(UserInputOption(label: label, description: description))
+            options.append(UserInputOption(
+                label: label, description: description, value: option["value"]?.stringValue
+            ))
         }
-        guard !options.isEmpty else { continue }
         parsed.append(
             UserInputQuestion(
                 id: id,
@@ -612,4 +659,17 @@ func parseUserInputQuestions(_ payload: [String: JSONValue]?) -> [UserInputQuest
         )
     }
     return parsed.isEmpty ? nil : parsed
+}
+
+public enum ISO8601Parsing {
+    public static func date(from string: String) -> Date? {
+        if let date = try? Date(string, strategy: .iso8601.year().month().day().time(includingFractionalSeconds: true)) {
+            return date
+        }
+        return try? Date(string, strategy: .iso8601)
+    }
+
+    public static func nowString() -> String {
+        Date.now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: true))
+    }
 }

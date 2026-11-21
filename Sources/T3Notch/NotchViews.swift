@@ -28,7 +28,7 @@ struct NotchRootView: View {
         VStack(spacing: 0) {
             // Top strip sits level with the physical notch, so its content has to
             // flank the notch rather than render behind the cutout.
-            TopStrip(store: store, metrics: metrics, isExpanded: isExpanded)
+            TopStrip(store: store, metrics: metrics, width: bodyWidth, isExpanded: isExpanded)
                 .frame(height: metrics.notchHeight)
 
             if isExpanded {
@@ -76,30 +76,66 @@ struct NotchRootView: View {
 private struct TopStrip: View {
     let store: AgentStore
     let metrics: NotchMetrics
+    let width: CGFloat
     let isExpanded: Bool
 
+    private var sideWidth: CGFloat? {
+        metrics.hasPhysicalNotch ? (width - metrics.notchWidth) / 2 - 10 : nil
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
+        let working = store.activeThreads.filter {
+            switch resolveThreadAwarenessPhase($0) {
+            case .running, .starting, .waitingForSubagents: true
+            default: false
+            }
+        }
+        let includesSubagentWait = working.contains { resolveThreadAwarenessPhase($0) == .waitingForSubagents }
+        let groupStatus = if working.count == 1 {
+            includesSubagentWait ? headline(for: .waitingForSubagents) : "Working"
+        } else {
+            "\(working.count) \(includesSubagentWait ? "active" : "working")"
+        }
+        let showingOtherThread = working.first?.id != store.focusedThread?.id
+        if !isExpanded, !working.isEmpty, working.count > 1 || showingOtherThread,
+           store.focusedPhase != .waitingForInput, store.focusedPhase != .waitingForApproval
+        {
+            if working.count <= 2 {
+                workingStrip(working[...], status: groupStatus)
+            } else {
+                TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 4)) { context in
+                    let pageCount = (working.count + 1) / 2
+                    let page = Int(context.date.timeIntervalSinceReferenceDate / 4) % pageCount
+                    let start = page * 2
+                    workingStrip(working[start..<min(start + 2, working.count)], status: groupStatus)
+                }
+            }
+        } else {
+            focusedStrip
+        }
+    }
+
+    private var focusedStrip: some View {
+        HStack(spacing: metrics.hasPhysicalNotch ? 0 : 12) {
             HStack(spacing: 6) {
-                ProviderLogo(brand: store.providerBrand, size: 13)
-                    .overlay(alignment: .bottomTrailing) {
-                        if store.focusedPhase == .running || store.focusedPhase == .starting {
-                            WorkingPulse()
-                                .frame(width: 5, height: 5)
-                                .offset(x: 2, y: 1)
-                        }
-                    }
+                providerStatusIcon(
+                    store.providerBrand,
+                    isWorking: store.focusedPhase == .running || store.focusedPhase == .starting
+                        || store.focusedPhase == .waitingForSubagents
+                )
 
                 Text(leadingLabel)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.92))
                     .lineLimit(1)
             }
+            .frame(width: sideWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Reserve the cutout itself.
-            Spacer(minLength: 0)
-                .frame(width: metrics.notchWidth)
+            if metrics.hasPhysicalNotch {
+                Spacer(minLength: 0)
+                    .frame(width: metrics.notchWidth)
+            }
 
             HStack(spacing: 7) {
                 if store.connectionState != .connected {
@@ -113,30 +149,87 @@ private struct TopStrip: View {
                 if let caption = store.walkthrough?.caption {
                     WalkthroughChip(caption: caption)
                 }
-                if store.activeThreads.count > 1 {
-                    Text("\(store.activeThreads.count)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.black)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(.white.opacity(0.9)))
+                if let statusLabel {
+                    Text(statusLabel)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .fixedSize()
                 }
                 if let elapsed = store.elapsedLabel {
                     Text(elapsed)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.75))
+                        .fixedSize()
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(width: sideWidth, alignment: .trailing)
         }
         .padding(.horizontal, 10)
     }
 
+    private func workingStrip(_ threads: ArraySlice<ThreadShell>, status: String) -> some View {
+        HStack(spacing: metrics.hasPhysicalNotch ? 0 : 12) {
+            if let first = threads.first {
+                workingTitle(first)
+                    .frame(width: sideWidth, alignment: .leading)
+            }
+
+            if metrics.hasPhysicalNotch {
+                Spacer(minLength: 0)
+                    .frame(width: metrics.notchWidth)
+            }
+
+            HStack(spacing: 7) {
+                if let second = threads.dropFirst().first {
+                    workingTitle(second)
+                }
+                Spacer(minLength: 2)
+                Text(status)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .fixedSize()
+            }
+            .frame(width: sideWidth, alignment: .trailing)
+        }
+        .font(.system(size: 11, weight: .semibold, design: .rounded))
+        .padding(.horizontal, 10)
+    }
+
+    private func workingTitle(_ thread: ThreadShell) -> some View {
+        HStack(spacing: 5) {
+            providerStatusIcon(store.providerBrand(for: thread), isWorking: true)
+            Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+        }
+    }
+
+    private func providerStatusIcon(_ brand: ProviderBrand, isWorking: Bool) -> some View {
+        ProviderLogo(brand: brand, size: 13)
+            .overlay(alignment: .bottomTrailing) {
+                if isWorking {
+                    WorkingPulse()
+                        .frame(width: 5, height: 5)
+                        .offset(x: 2, y: 1)
+                }
+            }
+    }
+
     private var leadingLabel: String {
         if store.needsOnboarding { return "Setup" }
-        if let phase = store.focusedPhase { return headline(for: phase) }
+        if let thread = store.focusedThread { return thread.title.isEmpty ? "Untitled thread" : thread.title }
         if store.walkthrough != nil { return "Quick start" }
         return "Idle"
+    }
+
+    private var statusLabel: String? {
+        guard !store.needsOnboarding, let phase = store.focusedPhase else { return nil }
+        if phase == .running {
+            let runningCount = store.activeThreads.count {
+                resolveThreadAwarenessPhase($0) == .running
+            }
+            if runningCount > 1 { return "\(runningCount) working" }
+        }
+        return headline(for: phase)
     }
 }
 
@@ -193,8 +286,18 @@ private struct ExpandedBody: View {
                     )
                 }
 
+                if store.hasPromptDeliveryFailure, let thread = store.focusedThread {
+                    PromptCard {
+                        Text("Answer delivery not confirmed")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Open in T3 Code") { store.openInT3Code(thread) }
+                    }
+                }
+
                 if !store.pendingApprovals.isEmpty || !store.pendingUserInputs.isEmpty {
                     PromptCarousel(store: store)
+                        .id(store.focusedThread?.id)
                 }
 
                 // Last, not first: what the agent did is what you look up for, and
@@ -223,8 +326,7 @@ private struct ExpandedBody: View {
     }
 }
 
-/// One pressable card per running agent, grouped under its project, so several
-/// chats can be watched at once and switched between.
+/// One card per agent, with project context inside each machine group.
 private struct ThreadCardDeck: View {
     @Bindable var store: AgentStore
 
@@ -242,58 +344,37 @@ private struct ThreadCardDeck: View {
                         HStack(spacing: 4) {
                             Image(systemName: machine.source == .local ? "laptopcomputer" : "server.rack")
                                 .font(.system(size: 8, weight: .semibold))
-                            Text(machine.label.uppercased())
+                            Text(machine.label)
                                 .font(.system(size: 8, weight: .semibold, design: .rounded))
-                                .tracking(0.5)
                         }
                         .foregroundStyle(.white.opacity(0.42))
                         .lineLimit(1)
                         .accessibilityLabel("Machine \(machine.label)")
                     }
-                    ForEach(machine.projects, id: \.project.id) { group in
-                        VStack(alignment: .leading, spacing: 5) {
-                            if machine.projects.count > 1 {
-                                Text(group.project.title.uppercased())
-                                    .font(.system(size: 8, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.35))
-                                    .tracking(0.5)
-                                    .lineLimit(1)
-                            }
-                            Grid(
-                                alignment: .topLeading,
-                                horizontalSpacing: NotchGeometry.cardSpacing,
-                                verticalSpacing: 5
-                            ) {
-                                ForEach(
-                                    Array(threadRows(group.threads).enumerated()),
-                                    id: \.offset
-                                ) { _, row in
-                                    GridRow {
-                                        ForEach(row) { thread in
-                                            ThreadCard(
-                                                store: store,
-                                                thread: thread,
-                                                isSelected: thread.id
-                                                    == store.focusedThread?.id
-                                            )
-                                            .transition(
-                                                .asymmetric(
-                                                    insertion: .opacity.combined(
-                                                        with: .scale(scale: 0.96)
-                                                    ),
-                                                    removal: .opacity.combined(
-                                                        with: .scale(scale: 0.9)
-                                                    )
-                                                )
-                                            )
+                    let threads = machine.projects.flatMap(\.threads)
+                    Grid(
+                        alignment: .topLeading,
+                        horizontalSpacing: NotchGeometry.cardSpacing,
+                        verticalSpacing: 8
+                    ) {
+                        ForEach(Array(threadRows(threads).enumerated()), id: \.offset) { _, row in
+                            GridRow {
+                                ForEach(row) { thread in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        if machine.projects.count > 1 {
+                                            SectionLabel(store.projectTitle(for: thread))
+                                                .lineLimit(1)
+                                                .frame(width: NotchGeometry.cardWidth, alignment: .leading)
                                         }
+                                        ThreadCard(
+                                            store: store,
+                                            thread: thread,
+                                            isSelected: thread.id == store.focusedThread?.id
+                                        )
                                     }
+                                    .transition(.opacity)
                                 }
                             }
-                            .animation(
-                                .spring(response: 0.32, dampingFraction: 0.84),
-                                value: group.threads.map(\.id)
-                            )
                         }
                     }
                 }
@@ -324,9 +405,7 @@ private struct ThreadCard: View {
     var body: some View {
         Button {
             if phase == .completed {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                    store.markReviewed(thread)
-                }
+                store.openInT3Code(thread)
             } else {
                 store.selectThread(thread.id)
             }
@@ -335,8 +414,8 @@ private struct ThreadCard: View {
                 HStack(spacing: 5) {
                     ProviderLogo(brand: store.providerBrand(for: thread), size: 11)
                     Text(store.modelLabel(for: thread) ?? store.providerBrand(for: thread).label)
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.62))
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if needsAnswer {
@@ -347,7 +426,7 @@ private struct ThreadCard: View {
                 }
 
                 Text(thread.title)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(isSelected ? .white : .white.opacity(0.8))
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -362,16 +441,16 @@ private struct ThreadCard: View {
                             .frame(width: 5, height: 5)
                         Text(
                             phase == .completed
-                                ? "Done · Dismiss"
+                                ? "Done · Open"
                                 : headline(for: phase)
                         )
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(statusColor(phase))
                             .lineLimit(1)
                     }
                     if let elapsed = store.elapsedLabel(for: thread) {
                         Text(elapsed)
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .font(.system(size: 10, weight: .medium)).monospacedDigit()
                             .foregroundStyle(.white.opacity(0.45))
                     }
                 }
@@ -397,9 +476,14 @@ private struct ThreadCard: View {
             )
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if phase == .completed {
+                Button("Dismiss") { store.markReviewed(thread) }
+            }
+        }
         .accessibilityHint(
             phase == .completed
-                ? "Dismisses this completed thread."
+                ? "Opens this completed thread in T3 Code."
                 : "Shows this thread."
         )
     }
@@ -409,7 +493,7 @@ private struct ThreadCard: View {
         case .waitingForApproval, .waitingForInput: .orange
         case .failed: .red
         case .completed: .green
-        case .running, .starting: .cyan
+        case .running, .starting, .waitingForSubagents: .cyan
         case .stale: .gray
         }
     }
@@ -422,9 +506,8 @@ private struct SectionLabel: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 9, weight: .semibold, design: .rounded))
-            .foregroundStyle(.white.opacity(0.4))
-            .tracking(0.6)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.white.opacity(0.62))
     }
 }
 
@@ -434,12 +517,10 @@ private struct HeaderRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(store.projectTitle.uppercased())
-                    .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .tracking(0.6)
+                SectionLabel(store.projectTitle)
+                    .lineLimit(1)
                 Text(store.focusedThread?.title ?? "No active agent")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
             }
@@ -751,7 +832,7 @@ private struct PhaseChip: View {
         case .waitingForApproval, .waitingForInput: return .orange
         case .failed: return .red
         case .completed: return .green
-        case .running, .starting: return .cyan
+        case .running, .starting, .waitingForSubagents: return .cyan
         case .stale: return .gray
         }
     }
@@ -864,12 +945,11 @@ private struct TaskRow: View {
             .frame(width: 12)
 
             Text(step.step)
-                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(
                     step.status == .completed
-                        ? Color.white.opacity(0.45) : Color.white.opacity(0.9)
+                        ? Color.white.opacity(0.60) : Color.white.opacity(0.9)
                 )
-                .strikethrough(step.status == .completed, color: .white.opacity(0.35))
                 .lineLimit(1)
         }
     }
@@ -920,6 +1000,20 @@ private enum PromptSlide: Identifiable, Equatable {
     case approval(PendingApproval)
     case question(input: PendingUserInput, question: UserInputQuestion)
 
+    var requiresT3Code: Bool {
+        switch self {
+        case let .approval(approval): approval.requestKind == "mcp-elicitation"
+        case let .question(_, question): question.options.isEmpty
+        }
+    }
+
+    var requestID: String {
+        switch self {
+        case let .approval(approval): approval.requestId
+        case let .question(input, _): input.requestId
+        }
+    }
+
     var id: String {
         switch self {
         case let .approval(approval): "approval:\(approval.requestId)"
@@ -939,6 +1033,8 @@ private struct PromptCarousel: View {
     /// requestId -> questionId -> answer, accumulated until a request completes.
     @State private var drafts: [String: [String: JSONValue]] = [:]
     @State private var multiSelection: [String: Set<String>] = [:]
+    @State private var submitting = false
+    @State private var selectedSlideID: String?
 
     private var slides: [PromptSlide] {
         store.pendingApprovals.map(PromptSlide.approval)
@@ -948,13 +1044,19 @@ private struct PromptCarousel: View {
     }
 
     private var currentIndex: Int? {
-        slides.firstIndex { !answered.contains($0.id) }
+        if let selectedSlideID, let selected = slides.firstIndex(where: {
+            $0.id == selectedSlideID && !answered.contains($0.id)
+        }) {
+            return selected
+        }
+        return slides.firstIndex { !answered.contains($0.id) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let index = currentIndex {
                 let slide = slides[index]
+                let displayedThread = store.focusedScopedThread
 
                 HStack(spacing: 6) {
                     Text("\(index + 1) of \(slides.count)")
@@ -976,30 +1078,48 @@ private struct PromptCarousel: View {
                                 .foregroundStyle(.white.opacity(0.55))
                         }
                         .buttonStyle(.plain)
+                        .disabled(submitting)
+                    }
+                    if slide.requiresT3Code,
+                       let next = slides.dropFirst(index + 1).first(where: { !answered.contains($0.id) })
+                    {
+                        Button("Next") { selectedSlideID = next.id }
+                            .buttonStyle(.plain)
+                            .disabled(submitting)
                     }
                 }
 
                 Group {
                     switch slide {
                     case let .approval(approval):
-                        ApprovalSlide(approval: approval) { decision in
-                            store.respondToApproval(approval, decision: decision)
-                            advance(past: slide)
-                        }
+                        ApprovalSlide(
+                            approval: approval,
+                            onDecision: { decision in
+                                guard displayedThread != nil || store.isDemoRunning else { return }
+                                submit(slide, on: displayedThread) {
+                                    await store.respondToApproval(approval, decision: decision, on: displayedThread)
+                                }
+                            },
+                            onOpen: openThread
+                        )
                     case let .question(input, question):
                         QuestionSlide(
                             question: question,
                             selection: multiSelection[question.id] ?? [],
                             isLast: index == slides.count - 1,
-                            onToggle: { label in toggle(question: question, label: label) },
+                            onToggle: { value in toggle(question: question, label: value) },
                             onAnswer: { answer in
-                                record(answer, for: question, in: input)
-                                advance(past: slide)
-                            }
+                                guard displayedThread != nil || store.isDemoRunning else { return }
+                                submit(slide, on: displayedThread) {
+                                    await record(answer, for: question, in: input, on: displayedThread)
+                                }
+                            },
+                            onOpen: openThread
                         )
                     }
                 }
                 .id(slide.id)
+                .disabled(submitting)
                 .transition(
                     .asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -1007,6 +1127,14 @@ private struct PromptCarousel: View {
                     )
                 )
                 .animation(notchSpring, value: slide.id)
+                if store.promptResponseFailed(slide.requestID) {
+                    PromptCard {
+                        Text("T3 Code could not send the response.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Open in T3 Code", action: openThread)
+                    }
+                }
             }
         }
         .clipped()
@@ -1015,6 +1143,10 @@ private struct PromptCarousel: View {
             let live = Set(ids)
             answered = answered.filter { live.contains($0) }
         }
+    }
+
+    private func openThread() {
+        if let thread = store.focusedThread { store.openInT3Code(thread) }
     }
 
     private func toggle(question: UserInputQuestion, label: String) {
@@ -1026,17 +1158,30 @@ private struct PromptCarousel: View {
     private func record(
         _ answer: JSONValue,
         for question: UserInputQuestion,
-        in input: PendingUserInput
-    ) {
+        in input: PendingUserInput,
+        on thread: ScopedThreadID?
+    ) async -> Bool {
         var requestAnswers = drafts[input.requestId] ?? [:]
         requestAnswers[question.id] = answer
         drafts[input.requestId] = requestAnswers
 
         // A request is only dispatched once every one of its questions is answered.
         let allAnswered = input.questions.allSatisfy { requestAnswers[$0.id] != nil }
-        guard allAnswered else { return }
-        store.respondToUserInput(input, answers: requestAnswers)
+        guard allAnswered else { return true }
+        guard await store.respondToUserInput(input, answers: requestAnswers, on: thread) else { return false }
         drafts[input.requestId] = nil
+        return true
+    }
+
+    private func submit(
+        _ slide: PromptSlide, on thread: ScopedThreadID?, action: @escaping @MainActor () async -> Bool
+    ) {
+        guard !submitting else { return }
+        submitting = true
+        Task {
+            defer { submitting = false }
+            if await action(), store.focusedScopedThread == thread { advance(past: slide) }
+        }
     }
 
     private func advance(past slide: PromptSlide) {
@@ -1047,6 +1192,7 @@ private struct PromptCarousel: View {
 
     private func goBack(from index: Int) {
         let previous = slides[index - 1]
+        selectedSlideID = previous.id
         withAnimation(notchSpring) {
             _ = answered.remove(previous.id)
         }
@@ -1080,6 +1226,7 @@ private struct SlideDots: View {
 private struct ApprovalSlide: View {
     let approval: PendingApproval
     let onDecision: (ApprovalDecision) -> Void
+    let onOpen: () -> Void
 
     var body: some View {
         PromptCard {
@@ -1092,11 +1239,15 @@ private struct ApprovalSlide: View {
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(4)
             }
-            HStack(spacing: 6) {
-                button("Approve", .accept, emphasis: true)
-                button("Always", .acceptForSession, emphasis: false)
-                button("Decline", .decline, emphasis: false)
-                button("Cancel", .cancel, emphasis: false)
+            if approval.requestKind == "mcp-elicitation" {
+                Button("Open in T3 Code", action: onOpen)
+            } else {
+                HStack(spacing: 6) {
+                    button("Approve", .accept, emphasis: true)
+                    button("This Session", .acceptForSession, emphasis: false)
+                    button("Decline", .decline, emphasis: false)
+                    button("Cancel", .cancel, emphasis: false)
+                }
             }
         }
     }
@@ -1122,6 +1273,7 @@ private struct QuestionSlide: View {
     let isLast: Bool
     let onToggle: (String) -> Void
     let onAnswer: (JSONValue) -> Void
+    let onOpen: () -> Void
 
     var body: some View {
         PromptCard {
@@ -1133,13 +1285,17 @@ private struct QuestionSlide: View {
                 .foregroundStyle(.white)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if question.options.isEmpty {
+                Button("Open in T3 Code", action: onOpen)
+            }
+
             ForEach(question.options) { option in
-                let isOn = selection.contains(option.label)
+                let isOn = selection.contains(option.value)
                 Button {
                     if question.multiSelect {
-                        onToggle(option.label)
+                        onToggle(option.value)
                     } else {
-                        onAnswer(.string(option.label))
+                        onAnswer(.string(option.value))
                     }
                 } label: {
                     HStack(alignment: .top, spacing: 8) {
@@ -1173,7 +1329,7 @@ private struct QuestionSlide: View {
                 .buttonStyle(.plain)
             }
 
-            if question.multiSelect {
+            if question.multiSelect && !question.options.isEmpty {
                 Button(isLast ? "Submit" : "Next") {
                     onAnswer(.array(selection.sorted().map(JSONValue.string)))
                 }
@@ -1211,7 +1367,7 @@ private struct OnboardingView: View {
     @Bindable var store: AgentStore
     @State private var token = ""
 
-    private let tokenCommand = "npx -y t3@latest auth session issue --token-only"
+    private let tokenCommand = TokenMinting.manualCommand
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
