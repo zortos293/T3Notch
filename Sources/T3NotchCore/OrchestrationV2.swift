@@ -58,7 +58,7 @@ struct OrchestrationV2Shell: Decodable {
                 branch: branch, worktreePath: worktreePath, latestTurn: turn,
                 createdAt: createdAt, updatedAt: updatedAt, archivedAt: archivedAt,
                 settledAt: settledAt, lastVisitedAt: lastVisitedAt,
-                lastOpenedAtMilliseconds: opens?.openedAt, session: turn.map { Session(status: $0.state) },
+                lastOpenedAtMilliseconds: opens?.openedAt, usesOrchestrationV2: true, session: turn.map { Session(status: $0.state) },
                 latestUserMessageAt: latestUserMessageAt,
                 hasPendingApprovals: pendingRuntimeRequest?.isApproval ?? false,
                 hasPendingUserInput: pendingRuntimeRequest?.isInput ?? false,
@@ -85,7 +85,6 @@ struct OrchestrationV2Shell: Decodable {
         case "preparing", "queued": return "starting"
         case "waiting": return "running"
         case "failed": return "error"
-        case "cancelled", "rolled_back": return "interrupted"
         default: return status
         }
     }

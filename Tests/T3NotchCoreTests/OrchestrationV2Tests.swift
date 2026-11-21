@@ -75,9 +75,41 @@ struct OrchestrationV2Tests {
             status: "completed", request: "null", completedAt: timestamp, lastVisitedAt: timestamp,
             openedAt: "1795262401000"
         )
-        #expect(!background.hasNewCompletionVisit(since: background))
-        #expect(opened.hasNewCompletionVisit(since: background))
-        #expect(!opened.hasNewCompletionVisit(since: opened))
+        let foregroundSince = Date(timeIntervalSince1970: 1_795_262_400.5)
+        #expect(!background.hasNewForegroundCompletionVisit(
+            since: nil, foregroundSince: foregroundSince, mostRecentOpenMilliseconds: 1_795_262_401_000
+        ))
+        #expect(!opened.hasNewForegroundCompletionVisit(
+            since: background, foregroundSince: foregroundSince, mostRecentOpenMilliseconds: 1_795_262_402_000
+        ))
+        #expect(opened.hasNewForegroundCompletionVisit(
+            since: background, foregroundSince: foregroundSince, mostRecentOpenMilliseconds: 1_795_262_401_000
+        ))
+        #expect(!opened.hasNewForegroundCompletionVisit(
+            since: opened, foregroundSince: foregroundSince, mostRecentOpenMilliseconds: 1_795_262_401_000
+        ))
+    }
+
+    @Test func legacyTeardownCanNotifyButAProtocolV2CancellationCannot() throws {
+        let running = try decodeShell(status: "running", request: "null")
+        let cancelled = try decodeShell(
+            status: "cancelled", request: "null", completedAt: #""2026-11-21T12:00:01Z""#
+        )
+        var legacy = cancelled
+        legacy.usesOrchestrationV2 = nil
+        legacy.latestTurn?.state = "interrupted"
+        legacy.latestTurn?.assistantMessageId = "finished-message"
+        legacy.session = Session(status: "stopped")
+        let prior = ShellSnapshot(
+            snapshotSequence: 1, projects: [], threads: [running], updatedAt: "2026-11-21T12:00:00Z"
+        )
+        var current = ShellSnapshot(
+            snapshotSequence: 2, projects: [], threads: [cancelled], updatedAt: "2026-11-21T12:00:01Z"
+        )
+        #expect(resolveThreadAwarenessPhase(cancelled) == nil)
+        #expect(newlyFinishedThreads(from: prior, to: current).isEmpty)
+        current.threads = [legacy]
+        #expect(newlyFinishedThreads(from: prior, to: current).map(\.id) == ["thread"])
     }
 
     @Test func projectionSuppliesQuestionsAndActivity() throws {

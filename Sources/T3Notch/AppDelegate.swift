@@ -85,6 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(frontmostAppChanged), name: NSWorkspace.didActivateApplicationNotification, object: nil
+        )
+        frontmostAppChanged()
         let satisfaction = networkSatisfaction
         networkMonitor.pathUpdateHandler = { [weak self, satisfaction] path in
             let isSatisfied = path.status == .satisfied
@@ -106,6 +110,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await self?.store.performRemoteMaintenance()
             }
         }
+    }
+
+    @objc private func frontmostAppChanged() {
+        store.noteDesktopActivation(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
 
     @objc private func macDidWake() {

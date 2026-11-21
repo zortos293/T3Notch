@@ -7,6 +7,7 @@ public struct ShellSnapshot: Codable, Sendable, Equatable {
     public var projects: [ProjectShell]
     public var threads: [ThreadShell]
     public var updatedAt: String
+    public var observedAt: Date?
 
     public init(
         snapshotSequence: Int,
@@ -129,6 +130,7 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
     public var settledAt: String?
     public var lastVisitedAt: String?
     public var lastOpenedAtMilliseconds: Double?
+    public var usesOrchestrationV2: Bool?
     public var session: Session?
     public var latestUserMessageAt: String?
     public var hasPendingApprovals: Bool
@@ -151,6 +153,7 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         settledAt: String? = nil,
         lastVisitedAt: String? = nil,
         lastOpenedAtMilliseconds: Double? = nil,
+        usesOrchestrationV2: Bool? = nil,
         session: Session? = nil,
         latestUserMessageAt: String? = nil,
         hasPendingApprovals: Bool = false,
@@ -172,6 +175,7 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         self.settledAt = settledAt
         self.lastVisitedAt = lastVisitedAt
         self.lastOpenedAtMilliseconds = lastOpenedAtMilliseconds
+        self.usesOrchestrationV2 = usesOrchestrationV2
         self.session = session
         self.latestUserMessageAt = latestUserMessageAt
         self.hasPendingApprovals = hasPendingApprovals
@@ -186,16 +190,18 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         return visitedAt >= completedAt
     }
 
-    public func hasNewCompletionVisit(since previous: ThreadShell?) -> Bool {
-        guard hasSeenCompletion else { return false }
-        if previous?.latestTurn?.turnId != latestTurn?.turnId || previous?.hasSeenCompletion != true {
-            return true
-        }
-        guard let openedAt = lastOpenedAtMilliseconds,
-              let completedAt = latestTurn?.completedAt.flatMap(ISO8601Parsing.date(from:))
+    public func hasNewForegroundCompletionVisit(
+        since previous: ThreadShell?,
+        foregroundSince: Date,
+        mostRecentOpenMilliseconds: Double?
+    ) -> Bool {
+        guard hasSeenCompletion, let openedAt = lastOpenedAtMilliseconds,
+              openedAt == mostRecentOpenMilliseconds,
+              openedAt >= foregroundSince.timeIntervalSince1970 * 1_000
         else { return false }
-        return openedAt != previous?.lastOpenedAtMilliseconds
-            && openedAt >= completedAt.timeIntervalSince1970 * 1_000
+        return previous?.latestTurn?.turnId != latestTurn?.turnId
+            || previous?.hasSeenCompletion != true
+            || openedAt != previous?.lastOpenedAtMilliseconds
     }
 }
 

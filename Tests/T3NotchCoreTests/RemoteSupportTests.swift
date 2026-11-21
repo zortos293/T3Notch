@@ -567,6 +567,30 @@ struct RemoteSupportTests {
         } catch T3HTTPError.unauthorized {}
     }
 
+    @Test func emptyRemoteShellKeepsTheServerObservationTime() async throws {
+        let session = mockSession { request in
+            (
+                HTTPURLResponse(
+                    url: request.url!, statusCode: 200, httpVersion: nil,
+                    headerFields: ["Date": "Sat, 21 Nov 2026 12:00:00 GMT"]
+                )!,
+                Data(#"{"snapshotSequence":1,"projects":[],"threads":[]}"#.utf8)
+            )
+        }
+        defer { MockRemoteURLProtocol.handler = nil }
+        let endpoint = try ServerEndpoint(httpBaseURL: #require(URL(string: "https://remote.example")))
+        let client = T3HTTPClient(endpoint: endpoint, token: "test", session: session)
+        let empty = try await client.fetchShell()
+        let completed = ThreadShell(
+            id: "thread", projectId: "project", title: "Fast run", modelSelection: ModelSelection(model: "test"),
+            latestTurn: LatestTurn(turnId: "run", state: "completed", completedAt: "2026-11-21T12:00:01Z"),
+            updatedAt: "2026-11-21T12:00:01Z"
+        )
+        let current = ShellSnapshot(snapshotSequence: 2, projects: [], threads: [completed], updatedAt: "")
+        #expect(empty.updatedAt.isEmpty)
+        #expect(newlyFinishedThreads(from: empty, to: current).map(\.id) == ["thread"])
+    }
+
     @Test func pollingBackoffUsesInjectedSleeperAndCapsFromHalfASecond() async throws {
         let session = mockSession { request in
             (

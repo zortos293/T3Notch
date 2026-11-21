@@ -159,10 +159,21 @@ public actor T3HTTPClient {
 
     public func fetchShell() async throws -> ShellSnapshot {
         let generation = endpointGeneration
-        let response: ShellResponse = try await get(path: "/api/orchestration/shell")
+        let endpointIsLocal = endpoint.isLoopback
+        var observedAt = Date.now
+        let request = try await makeRequest(path: "/api/orchestration/shell", method: "GET", body: nil)
+        let response: ShellResponse = try await perform(request) { http in
+            guard !endpointIsLocal, let header = http.value(forHTTPHeaderField: "Date") else { return }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+            observedAt = formatter.date(from: header) ?? observedAt
+        }
         guard generation == endpointGeneration else { throw CancellationError() }
         usesOrchestrationV2 = response.isV2
-        return response.snapshot
+        var snapshot = response.snapshot
+        snapshot.observedAt = observedAt
+        return snapshot
     }
 
     public func fetchThreadDetail(_ threadId: String) async throws -> ThreadDetailSnapshot {
@@ -285,7 +296,9 @@ public actor T3HTTPClient {
         }
     }
 
-    private func perform<T: Decodable>(_ request: URLRequest) async throws -> T {
+    private func perform<T: Decodable>(
+        _ request: URLRequest, inspectResponse: ((HTTPURLResponse) -> Void)? = nil
+    ) async throws -> T {
         let data: Data
         let response: URLResponse
         do {
@@ -303,6 +316,7 @@ public actor T3HTTPClient {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw T3HTTPError.httpStatus(http.statusCode, body)
         }
+        inspectResponse?(http)
         if data.isEmpty, T.self == DispatchResult.self {
             return DispatchResult(ok: true) as! T
         }

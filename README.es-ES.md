@@ -213,8 +213,8 @@ plano deja el resultado visible. Los hilos que terminaron antes de iniciar el
 notch se consideran leídos.
 
 Haz clic en una tarjeta finalizada o en **Abrir en T3 Code** para abrir el hilo
-local en la app de escritorio. Desactiva **Abrir en la app de T3 Code** para usar
-el navegador.
+correspondiente. Los hilos remotos se abren en el navegador. Los locales se abren
+en la app de escritorio si **Abrir en la app de T3 Code** está activado.
 
 ### Detectar merges
 

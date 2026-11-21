@@ -80,6 +80,7 @@ final class AgentStore {
     private var scopedThreads: [String: ScopedThreadID] = [:]
     private var scopedProjects: [String: ScopedProjectID] = [:]
     private var localEnvironmentID: EnvironmentID?
+    private var desktopForegroundSince: Date?
     private var dpopSigner: DPoPSigner?
     private var t3ConnectClient: T3ConnectClient?
     private var t3ConnectConfiguration: T3ConnectConfiguration?
@@ -347,8 +348,9 @@ final class AgentStore {
 
     /// Leave a finished card unread until its thread has been opened.
     func openInT3Code(_ thread: ThreadShell) {
+        let finished = resolveThreadAwarenessPhase(thread) == .completed
         if isDemoRunning {
-            markReviewed(thread)
+            if finished { markReviewed(thread) }
             return
         }
         guard let scoped = scopedThreads[thread.id],
@@ -359,14 +361,14 @@ final class AgentStore {
            settings.values.openInDesktopApp,
            NSWorkspace.shared.open(scoped.desktopURL)
         {
-            markReviewed(thread)
+            if finished { markReviewed(thread) }
             return
         }
         let baseURL = snapshot.activeAccessPath == .t3Connect
             ? URL(string: "https://app.t3.codes/")!
             : snapshot.profile.directEndpoint?.baseURL ?? endpoint.baseURL
         if NSWorkspace.shared.open(scoped.webURL(baseURL: baseURL)) {
-            markReviewed(thread)
+            if finished { markReviewed(thread) }
         }
     }
 
@@ -1608,10 +1610,10 @@ final class AgentStore {
             if let current = snapshot.shell {
                 let environmentID = snapshot.profile.environmentID
                 let isLocal = snapshot.activeAccessPath == .local
-                if isLocal, !isDemoRunning, let earlier = previous?.shell,
-                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.hasPrefix("com.t3tools.t3code") == true
-                {
-                    recordLocalCompletionVisits(in: current, since: earlier, environmentID: environmentID)
+                if isLocal, !isDemoRunning, let earlier = previous?.shell, let foregroundSince = desktopForegroundSince {
+                    recordLocalCompletionVisits(
+                        in: current, since: earlier, environmentID: environmentID, foregroundSince: foregroundSince
+                    )
                 }
                 removeSeenCompletionBanners(in: current, environmentID: environmentID, isLocal: isLocal)
                 if !isDemoRunning, let earlier = previous?.shell {
@@ -2058,14 +2060,25 @@ final class AgentStore {
         }
     }
 
+    func noteDesktopActivation(_ bundleID: String?) {
+        let t3BundleIDs = ["com.t3tools.t3code", "com.t3tools.t3code-dev", "com.t3tools.t3code.dev"]
+        if let bundleID, t3BundleIDs.contains(bundleID) {
+            desktopForegroundSince = desktopForegroundSince ?? .now
+        } else {
+            desktopForegroundSince = nil
+        }
+    }
+
     private func recordLocalCompletionVisits(
-        in current: ShellSnapshot, since previous: ShellSnapshot, environmentID: EnvironmentID
+        in current: ShellSnapshot, since previous: ShellSnapshot, environmentID: EnvironmentID, foregroundSince: Date
     ) {
         // T3 Code's visit tracker can advance while its window is in the background.
         let prior = Dictionary(previous.threads.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
-        for thread in current.threads
-            where resolveThreadAwarenessPhase(thread) == .completed && thread.hasNewCompletionVisit(since: prior[thread.id])
-        {
+        let mostRecentOpen = current.threads.compactMap(\.lastOpenedAtMilliseconds).max()
+        for thread in current.threads where resolveThreadAwarenessPhase(thread) == .completed {
+            guard thread.hasNewForegroundCompletionVisit(
+                since: prior[thread.id], foregroundSince: foregroundSince, mostRecentOpenMilliseconds: mostRecentOpen
+            ) else { continue }
             let key = completionKey(for: thread, in: environmentID)
             if !reviewStore.contains(key) {
                 reviewStore.insert(key)
@@ -2143,6 +2156,10 @@ final class AgentStore {
             // A beat of empty panel, so the next banner reads as a new event.
             try? await Task.sleep(for: .milliseconds(280))
             guard !Task.isCancelled, self.celebrationToken == token else { return }
+            guard !self.milestoneQueue.isEmpty else {
+                self.recomputePresentation(userInitiated: false)
+                return
+            }
             self.show(self.milestoneQueue.removeFirst())
         }
     }

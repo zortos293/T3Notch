@@ -29,14 +29,14 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     if thread.session?.status == "running" || thread.latestTurn?.state == "running" {
         return .running
     }
-    if thread.latestTurn?.state == "completed" {
+    if isSuccessfulCompletion(thread)
+        || (thread.usesOrchestrationV2 != true && thread.latestTurn?.state == "interrupted"
+            && thread.latestTurn?.completedAt != nil)
+    {
         return .completed
     }
-    // A turn that finished can still read as "interrupted" here: session
-    // teardown settles still-running turns by session status, and that write
-    // can race the turn.completed one. completedAt survives the race.
-    if thread.latestTurn?.state == "interrupted", thread.latestTurn?.completedAt != nil {
-        return .completed
+    if let state = thread.latestTurn?.state, ["interrupted", "cancelled", "rolled_back"].contains(state) {
+        return nil
     }
     if thread.session?.status == "ready"
         || thread.session?.status == "idle"
@@ -47,6 +47,15 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     return nil
 }
 
+private func isSuccessfulCompletion(_ thread: ThreadShell) -> Bool {
+    guard let turn = thread.latestTurn else { return false }
+    if turn.state == "completed" { return true }
+    // A legacy teardown can preserve the final assistant message and completion time.
+    return thread.usesOrchestrationV2 != true && turn.state == "interrupted"
+        && turn.completedAt != nil && turn.assistantMessageId != nil
+        && ["ready", "idle", "stopped"].contains(thread.session?.status ?? "")
+}
+
 /// Successful runs that completed between two snapshots, including short runs
 /// that finished before the next poll could see them working.
 public func newlyFinishedThreads(from previous: ShellSnapshot, to current: ShellSnapshot) -> [ThreadShell] {
@@ -54,17 +63,17 @@ public func newlyFinishedThreads(from previous: ShellSnapshot, to current: Shell
         previous.threads.map { ($0.id, $0) },
         uniquingKeysWith: { _, latest in latest }
     )
-    let previousUpdate = ISO8601Parsing.date(from: previous.updatedAt)
+    let previousUpdate = previous.observedAt ?? ISO8601Parsing.date(from: previous.updatedAt)
     return current.threads.filter { thread in
         guard thread.archivedAt == nil,
               let turn = thread.latestTurn,
-              turn.state == "completed",
+              isSuccessfulCompletion(thread),
               resolveThreadAwarenessPhase(thread) == .completed
         else { return false }
 
         if let prior = priorThreads[thread.id] {
             return prior.latestTurn?.turnId != turn.turnId
-                || prior.latestTurn?.state != "completed"
+                || !isSuccessfulCompletion(prior)
                 || resolveThreadAwarenessPhase(prior) != .completed
         }
         // A previously hidden historical thread can reappear in a snapshot.
