@@ -213,7 +213,7 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
                 let interval = active
                     ? configuration.activeShellNanoseconds
                     : configuration.idleShellNanoseconds
-                await sleepInterruptible(nanoseconds: interval)
+                await sleepUntilShellPoll(nanoseconds: interval)
             } catch let error as T3HTTPError {
                 if case .unauthorized = error {
                     setConnectionState(.unauthorized)
@@ -245,9 +245,7 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
             // Only the focused thread's detail is ever displayed, so other
             // subscriptions idle instead of polling alongside it.
             if focused != threadId {
-                await sleepInterruptible(
-                    nanoseconds: configuration.idleDetailNanoseconds
-                )
+                await configuration.sleep(configuration.idleDetailNanoseconds)
                 continue
             }
 
@@ -260,11 +258,9 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
                 let interval = (expanded || active)
                     ? configuration.focusedDetailNanoseconds
                     : configuration.idleDetailNanoseconds
-                await sleepInterruptible(nanoseconds: interval)
+                await configuration.sleep(interval)
             } catch {
-                await sleepInterruptible(
-                    nanoseconds: configuration.idleDetailNanoseconds
-                )
+                await configuration.sleep(configuration.idleDetailNanoseconds)
             }
         }
         continuation.finish()
@@ -284,7 +280,7 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
         return changed
     }
 
-    private func sleepInterruptible(nanoseconds: UInt64) async {
+    private func sleepUntilShellPoll(nanoseconds: UInt64) async {
         let slice: UInt64 = 100_000_000
         var remaining = nanoseconds
         while remaining > 0 {
@@ -303,6 +299,6 @@ public final class PollingTransport: T3Transport, @unchecked Sendable {
         )
         let delay = configuration.jitter(backoffNanos)
         configuration.onBackoff(delay)
-        await sleepInterruptible(nanoseconds: delay)
+        await sleepUntilShellPoll(nanoseconds: delay)
     }
 }
