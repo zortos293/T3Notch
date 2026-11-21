@@ -25,6 +25,7 @@ final class AgentStore {
 
     var connectionState: ConnectionState = .connecting
     private var failedPromptResponses: Set<ScopedRequestID> = []
+    private var inFlightPromptResponses: Set<ScopedRequestID> = []
     var projects: [ProjectShell] = []
     var threads: [ThreadShell] = []
     var focusedThreadId: String?
@@ -1538,10 +1539,13 @@ final class AgentStore {
         _ command: DispatchCommand, requestId: String, thread: ScopedThreadID
     ) async -> Bool {
         let request = ScopedRequestID(thread: thread, requestID: requestId)
+        let key = scopedRequestKey(requestId, thread: thread)
+        guard !answeredRequestIds.contains(key), inFlightPromptResponses.insert(request).inserted else { return false }
+        defer { inFlightPromptResponses.remove(request) }
         failedPromptResponses.remove(request)
         do {
             try await coordinator.dispatch(command, to: thread.environmentID)
-            answeredRequestIds.insert(scopedRequestKey(requestId, thread: thread))
+            answeredRequestIds.insert(key)
             return true
         } catch {
             failedPromptResponses.insert(request)

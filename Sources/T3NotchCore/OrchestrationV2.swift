@@ -122,12 +122,24 @@ struct OrchestrationV2Detail: Decodable {
             let requestedAt: String?
             let startedAt: String?
             let completedAt: String?
+
+            var completionOrder: TimeInterval {
+                guard let completedAt else { return .infinity }
+                let date = (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(completedAt))
+                    ?? (try? Date.ISO8601FormatStyle().parse(completedAt))
+                return date?.timeIntervalSince1970 ?? -.infinity
+            }
         }
 
         var detail: ThreadDetail {
-            let run = runs.filter {
-                $0.startedAt != nil || ["starting", "running", "waiting", "completed", "failed", "interrupted"].contains($0.status)
-            }.max { $0.ordinal < $1.ordinal } ?? runs.max { $0.ordinal < $1.ordinal }
+            // Queue ordinals describe submission order. A held run can execute later.
+            let run = runs.lazy.filter {
+                $0.status != "queued" && ($0.status != "cancelled" || $0.startedAt != nil)
+            }.max {
+                let left = $0.completionOrder
+                let right = $1.completionOrder
+                return left == right ? $0.ordinal < $1.ordinal : left < right
+            } ?? runs.max { $0.ordinal < $1.ordinal }
             let turn = run.map {
                 LatestTurn(
                     turnId: $0.id, state: OrchestrationV2Shell.phase($0.status),
