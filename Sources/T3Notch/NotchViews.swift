@@ -986,6 +986,7 @@ private struct PromptCarousel: View {
         VStack(alignment: .leading, spacing: 8) {
             if let index = currentIndex {
                 let slide = slides[index]
+                let displayedThread = store.focusedScopedThread
 
                 HStack(spacing: 6) {
                     Text("\(index + 1) of \(slides.count)")
@@ -1024,7 +1025,7 @@ private struct PromptCarousel: View {
                         ApprovalSlide(
                             approval: approval,
                             onDecision: { decision in
-                                guard let thread = store.focusedScopedThread else { return }
+                                guard let thread = displayedThread else { return }
                                 submit(slide, on: thread) {
                                     await store.respondToApproval(approval, decision: decision, on: thread)
                                 }
@@ -1038,7 +1039,7 @@ private struct PromptCarousel: View {
                             isLast: index == slides.count - 1,
                             onToggle: { value in toggle(question: question, label: value) },
                             onAnswer: { answer in
-                                guard let thread = store.focusedScopedThread else { return }
+                                guard let thread = displayedThread else { return }
                                 submit(slide, on: thread) {
                                     await record(answer, for: question, in: input, on: thread)
                                 }
