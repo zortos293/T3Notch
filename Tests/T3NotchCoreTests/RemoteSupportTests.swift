@@ -513,6 +513,45 @@ struct RemoteSupportTests {
         }
     }
 
+    @Test func forcedShellPollDoesNotSkipAnUnfocusedDetailWait() async throws {
+        let pendingShell = UIntLog()
+        let releaseShell = DispatchSemaphore(value: 0)
+        let session = mockSession { _ in
+            pendingShell.append(1)
+            _ = releaseShell.wait(timeout: .now() + .seconds(2))
+            throw URLError(.cancelled)
+        }
+        defer { MockRemoteURLProtocol.handler = nil }
+        let sleeps = UIntLog()
+        let detailInterval: UInt64 = 25_000_000
+        let configuration = PollingConfiguration(
+            idleDetailNanoseconds: detailInterval,
+            sleep: { interval in
+                sleeps.append(interval)
+                try? await Task.sleep(nanoseconds: interval)
+            }
+        )
+        let transport = PollingTransport(
+            client: T3HTTPClient(endpoint: ServerEndpoint(), token: "test", session: session),
+            configuration: configuration
+        )
+        defer {
+            releaseShell.signal()
+            transport.stop()
+        }
+        for _ in 0..<100 where pendingShell.snapshot.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(!pendingShell.snapshot.isEmpty)
+        transport.requestImmediatePoll()
+        _ = transport.threadDetail("unfocused-thread")
+
+        for _ in 0..<50 where sleeps.snapshot.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(sleeps.snapshot.first == detailInterval)
+    }
+
     @Test func pollingBackoffUsesInjectedSleeperAndCapsFromHalfASecond() async throws {
         let session = mockSession { request in
             (
