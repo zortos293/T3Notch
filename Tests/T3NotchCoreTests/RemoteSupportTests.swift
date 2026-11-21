@@ -513,6 +513,60 @@ struct RemoteSupportTests {
         }
     }
 
+    @Test func endpointChangeRenegotiatesBeforeSendingAndRejectsNegativeLegacyReceipt() async throws {
+        let requests = RequestLog()
+        let session = mockSession { request in
+            requests.append(request)
+            let body: String
+            switch (request.url?.host, request.url?.path) {
+            case ("v2.example", "/api/orchestration/shell"):
+                body = #"{"snapshotSequence":1,"projects":[],"threads":[]}"#
+            case ("legacy.example", "/api/orchestration/shell"):
+                body = #"{"snapshotSequence":2,"projects":[],"threads":[],"updatedAt":""}"#
+            case ("legacy.example", "/api/orchestration/dispatch"):
+                body = #"{"accepted":false}"#
+            default:
+                throw URLError(.badURL)
+            }
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                Data(body.utf8)
+            )
+        }
+        defer { MockRemoteURLProtocol.handler = nil }
+        let v2 = try ServerEndpoint(httpBaseURL: #require(URL(string: "https://v2.example")))
+        let legacy = try ServerEndpoint(httpBaseURL: #require(URL(string: "https://legacy.example")))
+        let client = T3HTTPClient(endpoint: v2, token: "test", session: session)
+        _ = try await client.fetchShell()
+        await client.update(endpoint: legacy, token: "test")
+        do {
+            _ = try await client.dispatch(.turnInterrupt(
+                commandId: "id", threadId: "thread", turnId: "run", createdAt: ""
+            ))
+            Issue.record("The legacy rejection should throw")
+        } catch T3HTTPError.dispatchRejected {}
+        #expect(requests.requests.compactMap { $0.url?.path } == [
+            "/api/orchestration/shell", "/api/orchestration/shell", "/api/orchestration/dispatch",
+        ])
+    }
+
+    @Test func verifiesOperateScopeBeforeReusingAToken() async throws {
+        let session = mockSession { request in
+            let body = request.url?.path == "/api/auth/session"
+                ? #"{"authenticated":true,"scopes":["orchestration:read"]}"#
+                : #"{"snapshotSequence":1,"projects":[],"threads":[]}"#
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                Data(body.utf8)
+            )
+        }
+        defer { MockRemoteURLProtocol.handler = nil }
+        do {
+            _ = try await TokenMinting.verifyToken(token: "test", endpoint: ServerEndpoint(), session: session)
+            Issue.record("A read-only token should be rejected")
+        } catch T3HTTPError.unauthorized {}
+    }
+
     @Test func pollingBackoffUsesInjectedSleeperAndCapsFromHalfASecond() async throws {
         let session = mockSession { request in
             (

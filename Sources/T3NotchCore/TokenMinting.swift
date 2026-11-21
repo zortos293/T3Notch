@@ -15,22 +15,58 @@ public enum TokenMinting {
         }
     }
 
-    /// Try `t3` on PATH, then `npx -y t3@latest`.
-    public static func mintToken() async throws -> String {
-        // Apps opened from Finder inherit macOS's minimal launchd PATH rather than
-        // the PATH configured by the user's shell. Resolve it once so Homebrew,
-        // nvm, fnm, Volta and similar Node installations remain discoverable.
-        let environment = commandEnvironment()
-        if let token = try? await runTokenCommand(
-            ["t3", "auth", "session", "issue", "--token-only"],
-            environment: environment
-        ) {
-            return token
+    private static let issueArguments = [
+        "auth", "session", "issue", "--token-only", "--scope", "orchestration:read",
+        "--scope", "orchestration:operate", "--label", "T3Notch",
+    ]
+
+    public static let manualCommand = "t3 " + issueArguments.joined(separator: " ")
+
+    public static func loadOrMintToken(
+        endpoint: ServerEndpoint
+    ) async throws -> (token: String, shell: ShellSnapshot, reused: Bool) {
+        if let saved = KeychainStore.loadToken() {
+            do {
+                return (saved, try await verifyToken(token: saved, endpoint: endpoint), true)
+            } catch T3HTTPError.unauthorized {
+                // The stored token may belong to another installation of T3 Code.
+            }
         }
-        return try await runTokenCommand(
-            ["npx", "-y", "t3@latest", "auth", "session", "issue", "--token-only"],
-            environment: environment
+
+        let environment = commandEnvironment()
+        let bundled = environment["HOME"].map { [["\($0)/.t3/bin/t3"]] } ?? []
+        let candidates = bundled + [["t3"], ["npx", "-y", "t3@latest"]]
+        let verified = try await firstVerifiedToken(
+            from: candidates,
+            mint: { try await runTokenCommand($0 + issueArguments, environment: environment) },
+            verify: { try await verifyToken(token: $0, endpoint: endpoint) }
         )
+        try KeychainStore.saveToken(verified.token)
+        return (verified.token, verified.shell, false)
+    }
+
+    static func firstVerifiedToken(
+        from candidates: [[String]],
+        mint: ([String]) async throws -> String,
+        verify: (String) async throws -> ShellSnapshot
+    ) async throws -> (token: String, shell: ShellSnapshot) {
+        var lastError: Swift.Error = Error.emptyToken
+        for candidate in candidates {
+            try Task.checkCancellation()
+            let token: String
+            do {
+                token = try await mint(candidate)
+            } catch {
+                lastError = error
+                continue
+            }
+            do {
+                return (token, try await verify(token))
+            } catch T3HTTPError.unauthorized {
+                lastError = T3HTTPError.unauthorized
+            }
+        }
+        throw lastError
     }
 
     public static func verifyToken(
@@ -38,8 +74,21 @@ public enum TokenMinting {
         endpoint: ServerEndpoint,
         session: URLSession = .shared
     ) async throws -> ShellSnapshot {
+        struct SessionState: Decodable {
+            let authenticated: Bool?
+            let scopes: [String]?
+        }
         let client = T3HTTPClient(endpoint: endpoint, token: token, session: session)
-        return try await client.fetchShell()
+        let shell = try await client.fetchShell()
+        do {
+            let state: SessionState = try await client.get(path: "/api/auth/session")
+            guard state.authenticated != false,
+                  state.scopes?.contains("orchestration:operate") != false
+            else { throw T3HTTPError.unauthorized }
+        } catch T3HTTPError.httpStatus(404, _) {
+            // Older servers do not expose session scopes.
+        }
+        return shell
     }
 
     private static func runTokenCommand(

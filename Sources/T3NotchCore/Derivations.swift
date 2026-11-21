@@ -89,13 +89,15 @@ public struct PendingApproval: Sendable, Equatable, Identifiable {
 }
 
 public struct UserInputOption: Sendable, Equatable, Identifiable {
-    public var id: String { label }
+    public var id: [String] { [label, value] }
     public var label: String
     public var description: String
+    public var value: String
 
-    public init(label: String, description: String) {
+    public init(label: String, description: String, value: String? = nil) {
         self.label = label
         self.description = description
+        self.value = value ?? label
     }
 }
 
@@ -384,7 +386,9 @@ public func deriveRecentActivity(
         let detail = toolActivityDetail(payload, relativeTo: root)
         let isCompletion = activity.kind == "tool.completed"
 
-        if isCompletion, let index = openRowIndex(in: rows, kind: kind, detail: detail) {
+        if isCompletion, payload?["isItemSnapshot"]?.boolValue != true,
+           let index = openRowIndex(in: rows, kind: kind, detail: detail)
+        {
             rows[index].label = label
             // Only a completion knows which files a change touched.
             rows[index].detail = detail ?? rows[index].detail
@@ -551,7 +555,7 @@ private func lifecycleRank(_ kind: String) -> Int {
 
 func normalizedRequestKind(_ value: String) -> String? {
     switch value {
-    case "command", "file-read", "file-change":
+    case "command", "file-read", "file-change", "permission", "mcp-elicitation":
         return value
     default:
         return nil
@@ -598,9 +602,10 @@ func parseUserInputQuestions(_ payload: [String: JSONValue]?) -> [UserInputQuest
                   let label = option["label"]?.stringValue,
                   let description = option["description"]?.stringValue
             else { continue }
-            options.append(UserInputOption(label: label, description: description))
+            options.append(UserInputOption(
+                label: label, description: description, value: option["value"]?.stringValue
+            ))
         }
-        guard !options.isEmpty else { continue }
         parsed.append(
             UserInputQuestion(
                 id: id,

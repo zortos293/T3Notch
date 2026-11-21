@@ -3,6 +3,7 @@ import Foundation
 public enum T3HTTPError: Error, LocalizedError, Sendable {
     case invalidURL
     case unauthorized
+    case dispatchRejected
     case httpStatus(Int, String)
     case decoding(Error)
     case transport(Error)
@@ -14,6 +15,8 @@ public enum T3HTTPError: Error, LocalizedError, Sendable {
             return "Invalid URL"
         case .unauthorized:
             return "The environment rejected this session."
+        case .dispatchRejected:
+            return "T3 Code could not complete the action."
         case let .httpStatus(code, body):
             return "HTTP \(code): \(body.prefix(200))"
         case let .decoding(error):
@@ -83,6 +86,8 @@ public actor T3HTTPClient {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let encoder: JSONEncoder
+    private var endpointGeneration = 0
+    private var usesOrchestrationV2: Bool?
 
     public init(
         endpoint: ServerEndpoint,
@@ -112,11 +117,12 @@ public actor T3HTTPClient {
     public func update(endpoint: ServerEndpoint, authorizer: any HTTPAuthorizer) {
         self.endpoint = endpoint
         self.authorizer = authorizer
+        endpointGeneration += 1
+        usesOrchestrationV2 = nil
     }
 
     public func update(endpoint: ServerEndpoint, token: String) {
-        self.endpoint = endpoint
-        self.authorizer = BearerHTTPAuthorizer(token: token)
+        update(endpoint: endpoint, authorizer: BearerHTTPAuthorizer(token: token))
     }
 
     public func fetchEnvironment() async throws -> EnvironmentDescriptor {
@@ -152,16 +158,98 @@ public actor T3HTTPClient {
     }
 
     public func fetchShell() async throws -> ShellSnapshot {
-        try await get(path: "/api/orchestration/shell")
+        let generation = endpointGeneration
+        let response: ShellResponse = try await get(path: "/api/orchestration/shell")
+        guard generation == endpointGeneration else { throw CancellationError() }
+        usesOrchestrationV2 = response.isV2
+        return response.snapshot
     }
 
     public func fetchThreadDetail(_ threadId: String) async throws -> ThreadDetailSnapshot {
         let encoded = threadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? threadId
-        return try await get(path: "/api/orchestration/threads/\(encoded)")
+        let response: DetailResponse = try await get(path: "/api/orchestration/threads/\(encoded)")
+        return response.snapshot
     }
 
     public func dispatch(_ command: DispatchCommand) async throws -> DispatchResult {
-        try await post(path: "/api/orchestration/dispatch", body: command)
+        let generation = endpointGeneration
+        if usesOrchestrationV2 == nil {
+            _ = try await fetchShell()
+        }
+        guard generation == endpointGeneration else { throw CancellationError() }
+        if usesOrchestrationV2 == true {
+            return try await dispatchV2(command, generation: generation)
+        }
+        let request = try await makeRequest(
+            path: "/api/orchestration/dispatch", method: "POST", body: encoder.encode(command)
+        )
+        guard generation == endpointGeneration else { throw CancellationError() }
+        let result: DispatchResult = try await perform(request)
+        guard result.accepted != false, result.ok != false else { throw T3HTTPError.dispatchRejected }
+        return result
+    }
+
+    private func dispatchV2(_ command: DispatchCommand, generation: Int) async throws -> DispatchResult {
+        struct Ticket: Decodable { let ticket: String }
+        let frame = try OrchestrationV2CommandFrame(command: command)
+        let endpointURL = endpoint.baseURL
+        let request = try await makeRequest(path: "/api/auth/websocket-ticket", method: "POST", body: nil)
+        let ticket: Ticket = try await perform(request)
+        guard generation == endpointGeneration else { throw CancellationError() }
+        guard var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: true) else {
+            throw T3HTTPError.invalidURL
+        }
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        components.path = "/ws"
+        components.queryItems = [
+            URLQueryItem(name: "orchestrationProtocol", value: "2"),
+            URLQueryItem(name: "wsTicket", value: ticket.ticket),
+        ]
+        guard let url = components.url else { throw T3HTTPError.invalidURL }
+
+        let socket = session.webSocketTask(with: url)
+        socket.resume()
+        let timeout = Task {
+            do {
+                try await Task.sleep(for: .seconds(8))
+                socket.cancel()
+            } catch {}
+        }
+        defer {
+            timeout.cancel()
+            socket.cancel(with: .normalClosure, reason: nil)
+        }
+        do {
+            let outgoing = String(decoding: try encoder.encode(frame), as: UTF8.self)
+            try await socket.send(.string(outgoing))
+            while true {
+                let message = try await socket.receive()
+                let data: Data
+                switch message {
+                case let .string(text): data = Data(text.utf8)
+                case let .data(bytes): data = bytes
+                @unknown default: continue
+                }
+                let reply = try decoder.decode(JSONValue.self, from: data)
+                switch reply["_tag"]?.stringValue {
+                case "Ping":
+                    try await socket.send(.string(#"{"_tag":"Pong"}"#))
+                case "Exit":
+                    guard reply["requestId"]?.numberValue == 1 || reply["requestId"]?.stringValue == "1" else {
+                        continue
+                    }
+                    guard reply["exit"]?["_tag"]?.stringValue == "Success",
+                          let sequence = reply["exit"]?["value"]?["sequence"]?.numberValue.flatMap(Int.init(exactly:))
+                    else { throw T3HTTPError.dispatchRejected }
+                    return DispatchResult(sequence: sequence)
+                default:
+                    continue
+                }
+            }
+        } catch {
+            // Transport errors can include the one-time ticket in the URL.
+            throw T3HTTPError.dispatchRejected
+        }
     }
 
     public func get<T: Decodable>(path: String) async throws -> T {
@@ -183,6 +271,9 @@ public actor T3HTTPClient {
         request.httpMethod = method
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if path.hasPrefix("/api/orchestration/") {
+            request.setValue("2", forHTTPHeaderField: "X-T3-Orchestration-Protocol")
+        }
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -219,6 +310,37 @@ public actor T3HTTPClient {
             return try decoder.decode(T.self, from: data)
         } catch {
             throw T3HTTPError.decoding(error)
+        }
+    }
+}
+
+private struct ShellResponse: Decodable {
+    let snapshot: ShellSnapshot
+    let isV2: Bool
+
+    init(from decoder: Decoder) throws {
+        if let legacy = try? ShellSnapshot(from: decoder) {
+            snapshot = legacy
+            isV2 = false
+        } else {
+            snapshot = try OrchestrationV2Shell(from: decoder).snapshot
+            isV2 = true
+        }
+    }
+}
+
+private struct DetailResponse: Decodable {
+    let snapshot: ThreadDetailSnapshot
+
+    init(from decoder: Decoder) throws {
+        if let legacy = try? ThreadDetailSnapshot(from: decoder) {
+            snapshot = legacy
+        } else {
+            let response = try OrchestrationV2Detail(from: decoder)
+            snapshot = ThreadDetailSnapshot(
+                snapshotSequence: response.snapshotSequence,
+                thread: response.projection.detail
+            )
         }
     }
 }
