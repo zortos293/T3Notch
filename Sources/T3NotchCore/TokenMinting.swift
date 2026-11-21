@@ -15,20 +15,33 @@ public enum TokenMinting {
         }
     }
 
-    /// Try `t3` on PATH, then `npx -y t3@latest`.
+    private static let issueArguments = [
+        "auth", "session", "issue", "--token-only", "--scope", "orchestration:read",
+        "--scope", "orchestration:operate", "--label", "T3Notch",
+    ]
+
+    public static let manualCommand = "~/.t3/bin/t3 " + issueArguments.joined(separator: " ")
+
+    /// Prefer the CLI bundled with the desktop server before looking on PATH.
     public static func mintToken() async throws -> String {
         // Apps opened from Finder inherit macOS's minimal launchd PATH rather than
         // the PATH configured by the user's shell. Resolve it once so Homebrew,
         // nvm, fnm, Volta and similar Node installations remain discoverable.
         let environment = commandEnvironment()
+        if let home = environment["HOME"], let token = try? await runTokenCommand(
+            ["\(home)/.t3/bin/t3"] + issueArguments,
+            environment: environment
+        ) {
+            return token
+        }
         if let token = try? await runTokenCommand(
-            ["t3", "auth", "session", "issue", "--token-only"],
+            ["t3"] + issueArguments,
             environment: environment
         ) {
             return token
         }
         return try await runTokenCommand(
-            ["npx", "-y", "t3@latest", "auth", "session", "issue", "--token-only"],
+            ["npx", "-y", "t3@latest"] + issueArguments,
             environment: environment
         )
     }

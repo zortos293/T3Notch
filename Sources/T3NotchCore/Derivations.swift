@@ -92,10 +92,12 @@ public struct UserInputOption: Sendable, Equatable, Identifiable {
     public var id: String { label }
     public var label: String
     public var description: String
+    public var value: String
 
-    public init(label: String, description: String) {
+    public init(label: String, description: String, value: String? = nil) {
         self.label = label
         self.description = description
+        self.value = value ?? label
     }
 }
 
@@ -551,7 +553,7 @@ private func lifecycleRank(_ kind: String) -> Int {
 
 func normalizedRequestKind(_ value: String) -> String? {
     switch value {
-    case "command", "file-read", "file-change":
+    case "command", "file-read", "file-change", "permission", "mcp-elicitation":
         return value
     default:
         return nil
@@ -598,9 +600,10 @@ func parseUserInputQuestions(_ payload: [String: JSONValue]?) -> [UserInputQuest
                   let label = option["label"]?.stringValue,
                   let description = option["description"]?.stringValue
             else { continue }
-            options.append(UserInputOption(label: label, description: description))
+            options.append(UserInputOption(
+                label: label, description: description, value: option["value"]?.stringValue
+            ))
         }
-        guard !options.isEmpty else { continue }
         parsed.append(
             UserInputQuestion(
                 id: id,

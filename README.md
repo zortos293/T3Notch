@@ -109,9 +109,10 @@ open dist/T3Notch.app
 `xcode-select` may point at the Command Line Tools, which cannot build a SwiftUI
 app bundle — pin `DEVELOPER_DIR` as above.
 
-For a token, T3Notch tries the Keychain, then `t3 auth session issue --token-only`,
-then `npx -y t3@latest auth session issue --token-only`. If all three fail you can
-paste a bearer token into the panel. Tokens live in the Keychain under
+For a token, T3Notch checks the Keychain, then tries the CLI bundled with T3 Code.
+If that fails, it tries `t3` from PATH and then `npx -y t3@latest`. It requests the
+`orchestration:read` and `orchestration:operate` scopes. You can also paste a
+bearer token into the panel. Tokens live in the Keychain under
 `gg.t3tools.t3notch`, and a saved one is dropped unread when the build that wrote it
 is not the build reading it — otherwise every update would open the Keychain's
 password prompt, which costs more than minting a fresh token does.

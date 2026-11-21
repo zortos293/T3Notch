@@ -939,6 +939,7 @@ private struct PromptCarousel: View {
     /// requestId -> questionId -> answer, accumulated until a request completes.
     @State private var drafts: [String: [String: JSONValue]] = [:]
     @State private var multiSelection: [String: Set<String>] = [:]
+    @State private var submitting = false
 
     private var slides: [PromptSlide] {
         store.pendingApprovals.map(PromptSlide.approval)
@@ -982,24 +983,28 @@ private struct PromptCarousel: View {
                 Group {
                     switch slide {
                     case let .approval(approval):
-                        ApprovalSlide(approval: approval) { decision in
-                            store.respondToApproval(approval, decision: decision)
-                            advance(past: slide)
-                        }
+                        ApprovalSlide(
+                            approval: approval,
+                            onDecision: { decision in
+                                submit(slide) { await store.respondToApproval(approval, decision: decision) }
+                            },
+                            onOpen: openThread
+                        )
                     case let .question(input, question):
                         QuestionSlide(
                             question: question,
                             selection: multiSelection[question.id] ?? [],
                             isLast: index == slides.count - 1,
-                            onToggle: { label in toggle(question: question, label: label) },
+                            onToggle: { value in toggle(question: question, label: value) },
                             onAnswer: { answer in
-                                record(answer, for: question, in: input)
-                                advance(past: slide)
-                            }
+                                submit(slide) { await record(answer, for: question, in: input) }
+                            },
+                            onOpen: openThread
                         )
                     }
                 }
                 .id(slide.id)
+                .disabled(submitting)
                 .transition(
                     .asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -1007,6 +1012,11 @@ private struct PromptCarousel: View {
                     )
                 )
                 .animation(notchSpring, value: slide.id)
+                if let error = store.promptError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
         }
         .clipped()
@@ -1015,6 +1025,10 @@ private struct PromptCarousel: View {
             let live = Set(ids)
             answered = answered.filter { live.contains($0) }
         }
+    }
+
+    private func openThread() {
+        if let thread = store.focusedThread { store.openInT3Code(thread) }
     }
 
     private func toggle(question: UserInputQuestion, label: String) {
@@ -1027,16 +1041,26 @@ private struct PromptCarousel: View {
         _ answer: JSONValue,
         for question: UserInputQuestion,
         in input: PendingUserInput
-    ) {
+    ) async -> Bool {
         var requestAnswers = drafts[input.requestId] ?? [:]
         requestAnswers[question.id] = answer
         drafts[input.requestId] = requestAnswers
 
         // A request is only dispatched once every one of its questions is answered.
         let allAnswered = input.questions.allSatisfy { requestAnswers[$0.id] != nil }
-        guard allAnswered else { return }
-        store.respondToUserInput(input, answers: requestAnswers)
+        guard allAnswered else { return true }
+        guard await store.respondToUserInput(input, answers: requestAnswers) else { return false }
         drafts[input.requestId] = nil
+        return true
+    }
+
+    private func submit(_ slide: PromptSlide, action: @escaping @MainActor () async -> Bool) {
+        guard !submitting else { return }
+        submitting = true
+        Task {
+            defer { submitting = false }
+            if await action() { advance(past: slide) }
+        }
     }
 
     private func advance(past slide: PromptSlide) {
@@ -1080,6 +1104,7 @@ private struct SlideDots: View {
 private struct ApprovalSlide: View {
     let approval: PendingApproval
     let onDecision: (ApprovalDecision) -> Void
+    let onOpen: () -> Void
 
     var body: some View {
         PromptCard {
@@ -1092,11 +1117,15 @@ private struct ApprovalSlide: View {
                     .foregroundStyle(.white.opacity(0.85))
                     .lineLimit(4)
             }
-            HStack(spacing: 6) {
-                button("Approve", .accept, emphasis: true)
-                button("Always", .acceptForSession, emphasis: false)
-                button("Decline", .decline, emphasis: false)
-                button("Cancel", .cancel, emphasis: false)
+            if approval.requestKind == "mcp-elicitation" {
+                Button("Open in T3 Code", action: onOpen)
+            } else {
+                HStack(spacing: 6) {
+                    button("Approve", .accept, emphasis: true)
+                    button("This Session", .acceptForSession, emphasis: false)
+                    button("Decline", .decline, emphasis: false)
+                    button("Cancel", .cancel, emphasis: false)
+                }
             }
         }
     }
@@ -1122,6 +1151,7 @@ private struct QuestionSlide: View {
     let isLast: Bool
     let onToggle: (String) -> Void
     let onAnswer: (JSONValue) -> Void
+    let onOpen: () -> Void
 
     var body: some View {
         PromptCard {
@@ -1133,13 +1163,17 @@ private struct QuestionSlide: View {
                 .foregroundStyle(.white)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if question.options.isEmpty {
+                Button("Open in T3 Code", action: onOpen)
+            }
+
             ForEach(question.options) { option in
-                let isOn = selection.contains(option.label)
+                let isOn = selection.contains(option.value)
                 Button {
                     if question.multiSelect {
-                        onToggle(option.label)
+                        onToggle(option.value)
                     } else {
-                        onAnswer(.string(option.label))
+                        onAnswer(.string(option.value))
                     }
                 } label: {
                     HStack(alignment: .top, spacing: 8) {
@@ -1173,7 +1207,7 @@ private struct QuestionSlide: View {
                 .buttonStyle(.plain)
             }
 
-            if question.multiSelect {
+            if question.multiSelect && !question.options.isEmpty {
                 Button(isLast ? "Submit" : "Next") {
                     onAnswer(.array(selection.sorted().map(JSONValue.string)))
                 }
@@ -1211,7 +1245,7 @@ private struct OnboardingView: View {
     @Bindable var store: AgentStore
     @State private var token = ""
 
-    private let tokenCommand = "npx -y t3@latest auth session issue --token-only"
+    private let tokenCommand = TokenMinting.manualCommand
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

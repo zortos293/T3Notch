@@ -24,6 +24,7 @@ final class AgentStore {
     }
 
     var connectionState: ConnectionState = .connecting
+    var promptError: String?
     var projects: [ProjectShell] = []
     var threads: [ThreadShell] = []
     var focusedThreadId: String?
@@ -562,7 +563,7 @@ final class AgentStore {
             } catch {
                 needsOnboarding = true
                 onboardingMessage =
-                    "Could not mint a token automatically.\n\nRun:\n  npx -y t3@latest auth session issue --token-only\n\nand paste it here.\n\n\(error.localizedDescription)"
+                    "Could not mint a token automatically.\n\nRun:\n  \(TokenMinting.manualCommand)\n\nand paste it here.\n\n\(error.localizedDescription)"
                 connectionState = .unauthorized
                 return
             }
@@ -575,7 +576,7 @@ final class AgentStore {
         } catch {
             needsOnboarding = true
             onboardingMessage =
-                "Saved token was rejected. Paste a fresh token from:\n  npx -y t3@latest auth session issue --token-only\n\n\(error.localizedDescription)"
+                "Saved token was rejected. Paste a fresh token from:\n  \(TokenMinting.manualCommand)\n\n\(error.localizedDescription)"
             connectionState = .unauthorized
             return
         }
@@ -1502,15 +1503,13 @@ final class AgentStore {
         recomputePresentation(userInitiated: false)
     }
 
-    func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) {
-        guard let scoped = focusedScopedThread else { return }
+    func respondToApproval(_ approval: PendingApproval, decision: ApprovalDecision) async -> Bool {
+        guard let scoped = focusedScopedThread else { return false }
         if isDemoRunning {
             pendingApprovals.removeAll { $0.requestId == approval.requestId }
             finishDemoPrompt()
-            return
+            return true
         }
-        answeredRequestIds.insert(scopedRequestKey(approval.requestId, thread: scoped))
-        pendingApprovals.removeAll { $0.requestId == approval.requestId }
         let command = DispatchCommand.approvalRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,
@@ -1518,20 +1517,22 @@ final class AgentStore {
             decision: decision,
             createdAt: ISO8601Parsing.nowString()
         )
-        Task {
-            try? await coordinator.dispatch(command, to: scoped.environmentID)
+        guard await sendPromptResponse(command, requestId: approval.requestId, thread: scoped) else {
+            return false
         }
+        if focusedScopedThread == scoped {
+            pendingApprovals.removeAll { $0.requestId == approval.requestId }
+        }
+        return true
     }
 
-    func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) {
-        guard let scoped = focusedScopedThread else { return }
+    func respondToUserInput(_ input: PendingUserInput, answers: [String: JSONValue]) async -> Bool {
+        guard let scoped = focusedScopedThread else { return false }
         if isDemoRunning {
             pendingUserInputs.removeAll { $0.requestId == input.requestId }
             finishDemoPrompt()
-            return
+            return true
         }
-        answeredRequestIds.insert(scopedRequestKey(input.requestId, thread: scoped))
-        pendingUserInputs.removeAll { $0.requestId == input.requestId }
         let command = DispatchCommand.userInputRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,
@@ -1539,8 +1540,26 @@ final class AgentStore {
             answers: answers,
             createdAt: ISO8601Parsing.nowString()
         )
-        Task {
-            try? await coordinator.dispatch(command, to: scoped.environmentID)
+        guard await sendPromptResponse(command, requestId: input.requestId, thread: scoped) else {
+            return false
+        }
+        if focusedScopedThread == scoped {
+            pendingUserInputs.removeAll { $0.requestId == input.requestId }
+        }
+        return true
+    }
+
+    private func sendPromptResponse(
+        _ command: DispatchCommand, requestId: String, thread: ScopedThreadID
+    ) async -> Bool {
+        promptError = nil
+        do {
+            try await coordinator.dispatch(command, to: thread.environmentID)
+            answeredRequestIds.insert(scopedRequestKey(requestId, thread: thread))
+            return true
+        } catch {
+            promptError = "T3 Code could not send the response. Try again or open the thread."
+            return false
         }
     }
 
