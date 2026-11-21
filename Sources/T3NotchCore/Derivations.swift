@@ -47,6 +47,34 @@ public func resolveThreadAwarenessPhase(_ thread: ThreadShell) -> AgentAwareness
     return nil
 }
 
+/// Successful runs that completed between two snapshots, including short runs
+/// that finished before the next poll could see them working.
+public func newlyFinishedThreads(from previous: ShellSnapshot, to current: ShellSnapshot) -> [ThreadShell] {
+    let priorThreads = Dictionary(
+        previous.threads.map { ($0.id, $0) },
+        uniquingKeysWith: { _, latest in latest }
+    )
+    let previousUpdate = ISO8601Parsing.date(from: previous.updatedAt)
+    return current.threads.filter { thread in
+        guard thread.archivedAt == nil,
+              let turn = thread.latestTurn,
+              turn.state == "completed",
+              resolveThreadAwarenessPhase(thread) == .completed
+        else { return false }
+
+        if let prior = priorThreads[thread.id] {
+            return prior.latestTurn?.turnId != turn.turnId
+                || prior.latestTurn?.state != "completed"
+                || resolveThreadAwarenessPhase(prior) != .completed
+        }
+        // A previously hidden historical thread can reappear in a snapshot.
+        guard let previousUpdate, let completedAt = turn.completedAt.flatMap(ISO8601Parsing.date(from:)) else {
+            return false
+        }
+        return completedAt > previousUpdate
+    }
+}
+
 /// Keep the current card only while it remains active. Otherwise move to the
 /// highest-priority active card, or clear focus when no work remains.
 public func preferredFocusedThreadId(
@@ -617,4 +645,17 @@ func parseUserInputQuestions(_ payload: [String: JSONValue]?) -> [UserInputQuest
         )
     }
     return parsed.isEmpty ? nil : parsed
+}
+
+public enum ISO8601Parsing {
+    public static func date(from string: String) -> Date? {
+        if let date = try? Date(string, strategy: .iso8601.year().month().day().time(includingFractionalSeconds: true)) {
+            return date
+        }
+        return try? Date(string, strategy: .iso8601)
+    }
+
+    public static func nowString() -> String {
+        Date.now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: true))
+    }
 }

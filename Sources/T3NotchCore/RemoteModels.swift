@@ -23,6 +23,18 @@ public struct ScopedThreadID: Hashable, Codable, Sendable {
         self.threadID = threadID
     }
 
+    public var desktopURL: URL {
+        threadURL(baseURL: URL(string: "t3code://threads")!)
+    }
+
+    public func webURL(baseURL: URL) -> URL {
+        threadURL(baseURL: baseURL.appending(component: "threads"))
+    }
+
+    private func threadURL(baseURL: URL) -> URL {
+        baseURL.appending(component: environmentID.rawValue).appending(component: threadID)
+    }
+
     public var storageKey: String {
         Data(environmentID.rawValue.utf8).base64URLEncodedString()
             + "."

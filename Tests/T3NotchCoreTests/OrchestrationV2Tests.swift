@@ -15,6 +15,71 @@ struct OrchestrationV2Tests {
         #expect(resolveThreadAwarenessPhase(waiting) == .waitingForInput)
     }
 
+    @Test func regularRunsNotifyOnceIncludingRunsThatFinishBetweenPolls() throws {
+        let running = try decodeShell(status: "running", request: "null")
+        let completed = try decodeShell(status: "completed", request: "null")
+        let interrupted = try decodeShell(status: "interrupted", request: "null")
+        let nextRun = try decodeShell(status: "completed", request: "null", runID: "next-run")
+        let earlier = ShellSnapshot(
+            snapshotSequence: 1, projects: [], threads: [running], updatedAt: "2026-11-21T12:00:00Z"
+        )
+        let later = ShellSnapshot(
+            snapshotSequence: 2, projects: [], threads: [completed], updatedAt: "2026-11-21T12:00:01Z"
+        )
+        #expect(newlyFinishedThreads(from: earlier, to: later).map(\.id) == ["thread"])
+        #expect(newlyFinishedThreads(from: later, to: later).isEmpty)
+
+        var betweenPolls = later
+        betweenPolls.threads = [nextRun]
+        #expect(newlyFinishedThreads(from: later, to: betweenPolls).map(\.id) == ["thread"])
+
+        betweenPolls.threads = [interrupted]
+        #expect(newlyFinishedThreads(from: earlier, to: betweenPolls).isEmpty)
+    }
+
+    @Test func aPreviouslyUnseenThreadMustHaveFinishedSinceThePreviousSnapshot() throws {
+        let finished = try decodeShell(
+            status: "completed", request: "null", completedAt: #""2026-11-21T12:00:00.125Z""#
+        )
+        var prior = ShellSnapshot(
+            snapshotSequence: 1, projects: [], threads: [], updatedAt: "2026-11-21T12:00:00Z"
+        )
+        let current = ShellSnapshot(
+            snapshotSequence: 2, projects: [], threads: [finished], updatedAt: "2026-11-21T12:00:01Z"
+        )
+        #expect(newlyFinishedThreads(from: prior, to: current).map(\.id) == ["thread"])
+        prior.updatedAt = "2026-11-21T12:00:00.500Z"
+        #expect(newlyFinishedThreads(from: prior, to: current).isEmpty)
+    }
+
+    @Test func T3CodeVisitAtOrAfterCompletionMarksTheResultSeen() throws {
+        let completion = #""2026-11-21T12:00:00.125Z""#
+        let read = try decodeShell(
+            status: "completed", request: "null", completedAt: completion, lastVisitedAt: completion
+        )
+        let unread = try decodeShell(
+            status: "completed", request: "null", completedAt: completion, lastVisitedAt: #""2026-11-21T12:00:00Z""#
+        )
+        let noVisit = try decodeShell(status: "completed", request: "null", completedAt: completion)
+        #expect(read.hasSeenCompletion)
+        #expect(!unread.hasSeenCompletion)
+        #expect(!noVisit.hasSeenCompletion)
+    }
+
+    @Test func previouslyAcknowledgedWatermarkRequiresANewOpenToCountAgain() throws {
+        let timestamp = #""2026-11-21T12:00:00.125Z""#
+        let background = try decodeShell(
+            status: "completed", request: "null", completedAt: timestamp, lastVisitedAt: timestamp
+        )
+        let opened = try decodeShell(
+            status: "completed", request: "null", completedAt: timestamp, lastVisitedAt: timestamp,
+            openedAt: "1795262401000"
+        )
+        #expect(!background.hasNewCompletionVisit(since: background))
+        #expect(opened.hasNewCompletionVisit(since: background))
+        #expect(!opened.hasNewCompletionVisit(since: opened))
+    }
+
     @Test func projectionSuppliesQuestionsAndActivity() throws {
         let data = Data("""
         {"snapshotSequence":1,"projection":{
@@ -61,6 +126,13 @@ struct OrchestrationV2Tests {
         #expect(response.payload["answers"]?["confirm"] == .string("yes"))
     }
 
+    @Test func threadLinksUseTheEnvironmentAndThreadIDs() throws {
+        let thread = ScopedThreadID(environmentID: EnvironmentID("environment"), threadID: "thread")
+        #expect(thread.desktopURL.absoluteString == "t3code://threads/environment/thread")
+        let baseURL = try #require(URL(string: "https://t3.example/"))
+        #expect(thread.webURL(baseURL: baseURL).absoluteString == "https://t3.example/threads/environment/thread")
+    }
+
     private var thread: String {
         """
         "id":"thread","projectId":"project","title":"Test","modelSelection":{"model":"test"},
@@ -68,10 +140,13 @@ struct OrchestrationV2Tests {
         """
     }
 
-    private func decodeShell(status: String, request: String) throws -> ThreadShell {
+    private func decodeShell(
+        status: String, request: String, runID: String = "run", completedAt: String = "null",
+        lastVisitedAt: String = "null", openedAt: String = "null"
+    ) throws -> ThreadShell {
         let data = Data("""
         {"snapshotSequence":1,"projects":[],"threads":[{
-          \(thread),"latestRunId":"run","status":"\(status)","pendingRuntimeRequest":\(request)
+          \(thread),"latestRunId":"\(runID)","latestRunCompletedAt":\(completedAt),"lastVisitedAt":\(lastVisitedAt),"opens":{"openedAt":\(openedAt)},"status":"\(status)","pendingRuntimeRequest":\(request)
         }]}
         """.utf8)
         return try #require(JSONDecoder().decode(OrchestrationV2Shell.self, from: data).snapshot.threads.first)

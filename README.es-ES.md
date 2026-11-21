@@ -202,9 +202,19 @@ Cada par `tool.started`/`tool.completed` se pliega en una sola fila. Los dos no 
 
 ### Agentes finalizados
 
-Un agente finalizado permanece fijado como una tarjeta Hecho hasta que es revisado, en lugar de pasar rápidamente. Su barra de revisión está al pie del panel, bajo lo que el agente realmente hizo. Dos cosas la limpian: presionar **Abrir en T3 Code** en el notch, o estabilizar el hilo en T3 Code (`settledAt`). El propio estado de lectura de T3 Code vive en el almacenamiento local del renderer (`threadLastVisitedAtById`) y no se expone vía HTTP, así que simplemente abrir el hilo en la ventana de T3 Code no puede limpiar el notch. Los hilos que ya habían finalizado cuando el notch arrancó se tratan como vistos, así la primera instantánea no fija todo el historial.
+El notch contraído muestra hasta dos nombres de hilos en ejecución, con un
+indicador azul junto a cada nombre. Si hay más hilos en ejecución, los nombres
+rotan cada cuatro segundos. Expande el notch para ver las tarjetas y los detalles.
 
-**Abrir en T3 Code** lleva la app de escritorio al frente cuando está corriendo y solo cae en una pestaña de navegador cuando no. T3 Code registra `t3code://` pero no maneja rutas de hilos: una segunda instancia simplemente revela la ventana existente, así la app llega a cualquier hilo que ya estuviera mostrando en lugar del de la notch. La activación va a través de LaunchServices (`NSWorkspace.openApplication`), porque `NSRunningApplication.activate()` es ignorada para un llamador que no es él mismo activo, lo cual el panel de notch no-activador nunca es. Desactiva **Abrir en la app de T3 Code** para siempre usar el navegador, que hace deep-link al hilo exacto.
+Cuando un agente termina, el notch muestra un aviso breve. La tarjeta permanece
+hasta que abras o descartes el resultado, uses **Settle thread** o lo leas en T3 Code.
+En los hilos locales, una visita registrada mientras T3 Code está en segundo
+plano deja el resultado visible. Los hilos que terminaron antes de iniciar el
+notch se consideran leídos.
+
+Haz clic en una tarjeta finalizada o en **Abrir en T3 Code** para abrir el hilo
+local en la app de escritorio. Desactiva **Abrir en la app de T3 Code** para usar
+el navegador.
 
 ### Detectar merges
 

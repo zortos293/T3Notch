@@ -18,9 +18,9 @@ enum NotchGeometry {
 
     /// Width of the inverted corner that flares the panel out into the menu bar.
     static let wing: CGFloat = 14
-    /// How far the collapsed pill reaches past each side of the physical notch.
-    /// Wide enough for the provider logo plus a phase label like "Needs input".
     static let collapsedSideWidth: CGFloat = 104
+    /// Room beside the cutout for a thread title and for the status with a clock.
+    static let physicalCollapsedSideWidth: CGFloat = 140
     static let defaultExpandedBodyWidth: CGFloat = 470
     /// Horizontal inset of the expanded body content.
     static let bodyPadding: CGFloat = 16
@@ -92,12 +92,13 @@ enum NotchGeometry {
     }
 
     static func collapsedBodyWidth(_ metrics: NotchMetrics) -> CGFloat {
-        metrics.notchWidth + collapsedSideWidth * 2
+        let sideWidth = metrics.hasPhysicalNotch ? physicalCollapsedSideWidth : collapsedSideWidth
+        return metrics.notchWidth + sideWidth * 2
     }
 
     /// Grows with the agent card deck so every card fits without scrolling.
     static func expandedBodyWidth(_ metrics: NotchMetrics, agentCount: Int = 1) -> CGFloat {
-        let base = max(defaultExpandedBodyWidth, metrics.notchWidth + 200)
+        let base = max(defaultExpandedBodyWidth, collapsedBodyWidth(metrics))
         guard agentCount > 1 else { return base }
         let cards = CGFloat(min(agentCount, maxCardsPerRow))
         let deck = cards * cardWidth + (cards - 1) * cardSpacing + bodyPadding * 2

@@ -127,6 +127,8 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
     public var updatedAt: String
     public var archivedAt: String?
     public var settledAt: String?
+    public var lastVisitedAt: String?
+    public var lastOpenedAtMilliseconds: Double?
     public var session: Session?
     public var latestUserMessageAt: String?
     public var hasPendingApprovals: Bool
@@ -147,6 +149,8 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         updatedAt: String,
         archivedAt: String? = nil,
         settledAt: String? = nil,
+        lastVisitedAt: String? = nil,
+        lastOpenedAtMilliseconds: Double? = nil,
         session: Session? = nil,
         latestUserMessageAt: String? = nil,
         hasPendingApprovals: Bool = false,
@@ -166,11 +170,32 @@ public struct ThreadShell: Codable, Sendable, Equatable, Identifiable {
         self.updatedAt = updatedAt
         self.archivedAt = archivedAt
         self.settledAt = settledAt
+        self.lastVisitedAt = lastVisitedAt
+        self.lastOpenedAtMilliseconds = lastOpenedAtMilliseconds
         self.session = session
         self.latestUserMessageAt = latestUserMessageAt
         self.hasPendingApprovals = hasPendingApprovals
         self.hasPendingUserInput = hasPendingUserInput
         self.hasActionableProposedPlan = hasActionableProposedPlan
+    }
+
+    public var hasSeenCompletion: Bool {
+        guard let completedAt = latestTurn?.completedAt.flatMap(ISO8601Parsing.date(from:)),
+              let visitedAt = lastVisitedAt.flatMap(ISO8601Parsing.date(from:))
+        else { return false }
+        return visitedAt >= completedAt
+    }
+
+    public func hasNewCompletionVisit(since previous: ThreadShell?) -> Bool {
+        guard hasSeenCompletion else { return false }
+        if previous?.latestTurn?.turnId != latestTurn?.turnId || previous?.hasSeenCompletion != true {
+            return true
+        }
+        guard let openedAt = lastOpenedAtMilliseconds,
+              let completedAt = latestTurn?.completedAt.flatMap(ISO8601Parsing.date(from:))
+        else { return false }
+        return openedAt != previous?.lastOpenedAtMilliseconds
+            && openedAt >= completedAt.timeIntervalSince1970 * 1_000
     }
 }
 

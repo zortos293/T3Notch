@@ -15,6 +15,7 @@ struct OrchestrationV2Shell: Decodable {
     }
 
     struct Thread: Decodable {
+        struct Opens: Decodable { let openedAt: Double? }
         let id: String
         let projectId: String
         let title: String
@@ -27,6 +28,8 @@ struct OrchestrationV2Shell: Decodable {
         let updatedAt: String
         let archivedAt: String?
         let settledAt: String?
+        let lastVisitedAt: String?
+        let opens: Opens?
         let latestUserMessageAt: String?
         let hasActionableProposedPlan: Bool?
         let activeRunId: String?
@@ -54,7 +57,8 @@ struct OrchestrationV2Shell: Decodable {
                 runtimeMode: runtimeMode, interactionMode: interactionMode,
                 branch: branch, worktreePath: worktreePath, latestTurn: turn,
                 createdAt: createdAt, updatedAt: updatedAt, archivedAt: archivedAt,
-                settledAt: settledAt, session: turn.map { Session(status: $0.state) },
+                settledAt: settledAt, lastVisitedAt: lastVisitedAt,
+                lastOpenedAtMilliseconds: opens?.openedAt, session: turn.map { Session(status: $0.state) },
                 latestUserMessageAt: latestUserMessageAt,
                 hasPendingApprovals: pendingRuntimeRequest?.isApproval ?? false,
                 hasPendingUserInput: pendingRuntimeRequest?.isInput ?? false,
