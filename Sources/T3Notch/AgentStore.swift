@@ -1487,13 +1487,14 @@ final class AgentStore {
     }
 
     func respondToApproval(
-        _ approval: PendingApproval, decision: ApprovalDecision, on scoped: ScopedThreadID
+        _ approval: PendingApproval, decision: ApprovalDecision, on scoped: ScopedThreadID?
     ) async -> Bool {
         if isDemoRunning {
             pendingApprovals.removeAll { $0.requestId == approval.requestId }
             finishDemoPrompt()
             return true
         }
+        guard let scoped else { return false }
         let command = DispatchCommand.approvalRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,
@@ -1511,13 +1512,14 @@ final class AgentStore {
     }
 
     func respondToUserInput(
-        _ input: PendingUserInput, answers: [String: JSONValue], on scoped: ScopedThreadID
+        _ input: PendingUserInput, answers: [String: JSONValue], on scoped: ScopedThreadID?
     ) async -> Bool {
         if isDemoRunning {
             pendingUserInputs.removeAll { $0.requestId == input.requestId }
             finishDemoPrompt()
             return true
         }
+        guard let scoped else { return false }
         let command = DispatchCommand.userInputRespond(
             commandId: UUID().uuidString,
             threadId: scoped.threadID,

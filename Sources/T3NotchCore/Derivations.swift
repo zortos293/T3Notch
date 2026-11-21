@@ -89,7 +89,7 @@ public struct PendingApproval: Sendable, Equatable, Identifiable {
 }
 
 public struct UserInputOption: Sendable, Equatable, Identifiable {
-    public var id: String { label }
+    public var id: [String] { [label, value] }
     public var label: String
     public var description: String
     public var value: String

@@ -19,7 +19,7 @@ struct OrchestrationV2Tests {
         let data = Data("""
         {"snapshotSequence":1,"projection":{
           "thread":{\(thread)},
-          "runs":[{"id":"run","ordinal":1,"status":"waiting"}],
+          "runs":[{"id":"run","ordinal":1,"status":"waiting"},{"id":"next","ordinal":2,"status":"queued"}],
           "runtimeRequests":[
             {"id":"question","kind":"user_input","status":"pending","createdAt":"2026-11-21T12:00:00Z"},
             {"id":"sign-in","kind":"auth_refresh","status":"pending","createdAt":"2026-11-21T12:01:00Z"},
@@ -29,7 +29,7 @@ struct OrchestrationV2Tests {
           "turnItems":[
             {"id":"question-item","type":"user_input_request","requestId":"question",
              "questions":[{"id":"confirm","header":"Confirm","question":"Proceed?","options":[]}]},
-            {"id":"running-tool","type":"command_execution","status":"running","input":"pwd",
+            {"id":"running-tool","type":"command_execution","status":"waiting","input":"pwd",
              "updatedAt":"2026-11-21T11:58:00Z"},
             {"id":"tool","type":"command_execution","status":"completed","input":"pwd",
              "updatedAt":"2026-11-21T11:59:00Z"},
@@ -48,7 +48,16 @@ struct OrchestrationV2Tests {
         #expect(events.map(\.detail) == ["pwd", "pwd"])
         #expect(events.map(\.isRunning) == [true, false])
         let deliveryFailure = try #require(detail.activities.first { $0.kind == "prompt.delivery.failed" })
+        #expect(detail.latestTurn?.turnId == "run")
         #expect(deliveryFailure.turnId == detail.latestTurn?.turnId)
+    }
+
+    @Test func optionIdentityIncludesTheWireValue() {
+        let first = UserInputOption(label: "Yes", description: "", value: "1")
+        let second = UserInputOption(label: "Yes", description: "", value: "2")
+        let legacy = UserInputOption(label: "Yes", description: "")
+        #expect(first.id != second.id)
+        #expect(legacy.id == UserInputOption(label: "Yes", description: "", value: "Yes").id)
     }
 
     @Test func answersUseTheRuntimeRequestCommand() throws {
