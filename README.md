@@ -327,14 +327,16 @@ so simply opening the thread in the T3 Code window cannot clear the notch. Threa
 that had already finished when the notch launched are treated as seen, so the first
 snapshot does not pin all of history.
 
-**Open in T3 Code** brings the desktop app forward when it is running and only
-falls back to a browser tab when it is not. T3 Code registers `t3code://` but
-handles no thread routes — a second instance just reveals the existing window — so
-the app lands on whatever thread it was already showing rather than the one from
-the notch. Activation goes through LaunchServices (`NSWorkspace.openApplication`),
-because `NSRunningApplication.activate()` is ignored for a caller that is not
-itself active, which the non-activating notch panel never is. Turn **Open in the T3
-Code app** off to always use the browser, which does deep-link to the exact thread.
+**Open in T3 Code** opens the thread in the desktop app through its
+`t3code://threads/<environment>/<thread>` deep link, which also launches the app
+when it is not running. The dev build answers to `t3code-dev://`. Both ids are
+percent-encoded the way T3 Code encodes them. When the link cannot be opened, or
+the environment id is unknown, the running app is only brought forward through
+LaunchServices (`NSWorkspace.openApplication`), because `NSRunningApplication.activate()`
+is ignored for a caller that is not itself active, which the non-activating notch
+panel never is. Remote and T3 Connect threads, and a Mac without the desktop app,
+open the same route in the browser. Turn **Open in the T3 Code app** off to always
+use the browser.
 
 ### Detecting merges
 

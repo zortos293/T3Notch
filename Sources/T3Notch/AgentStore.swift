@@ -342,10 +342,11 @@ final class AgentStore {
 
     /// Opens the thread in T3 Code's own UI, which is what "reviewed" means here.
     ///
-    /// The desktop app is preferred when it is already running: T3 Code registers
-    /// `t3code://` but only ever reveals its window on a second instance, so there
-    /// is no deep link to a single thread. Bringing it forward beats opening a
-    /// duplicate of the same thread in a browser tab.
+    /// The desktop app opens on the exact thread through its `t3code://threads/…`
+    /// deep link, which also launches it when it is not running. Without an
+    /// environment id, or when the link cannot be opened, the running app is only
+    /// brought forward. Remote and T3 Connect threads, and a missing desktop app,
+    /// use the same route in the browser.
     func openInT3Code(_ thread: ThreadShell) {
         guard let scoped = scopedThreads[thread.id],
               let snapshot = snapshotsByEnvironment[scoped.environmentID]
@@ -353,19 +354,28 @@ final class AgentStore {
             markReviewed(thread)
             return
         }
-        if snapshot.activeAccessPath == .local,
-           settings.values.openInDesktopApp,
-           T3CodeApp.activate()
-        {
-            markReviewed(thread)
-            return
+        let environmentId = snapshot.descriptor?.environmentId
+        if snapshot.activeAccessPath == .local, settings.values.openInDesktopApp {
+            let linkOpened = environmentId
+                .flatMap {
+                    ThreadDeepLink.desktopURL(
+                        scheme: T3CodeApp.urlScheme,
+                        environmentId: $0,
+                        threadId: scoped.threadID
+                    )
+                }
+                .map { NSWorkspace.shared.open($0) } ?? false
+            if linkOpened || T3CodeApp.activate() {
+                markReviewed(thread)
+                return
+            }
         }
         let baseURL = snapshot.activeAccessPath == .t3Connect
             ? URL(string: "https://app.t3.codes/")!
             : snapshot.profile.directEndpoint?.baseURL ?? endpoint.baseURL
-        if let environmentId = snapshot.descriptor?.environmentId,
+        if let environmentId,
            let url = URL(
-               string: "/threads/\(environmentId)/\(scoped.threadID)",
+               string: ThreadDeepLink.webPath(environmentId: environmentId, threadId: scoped.threadID),
                relativeTo: baseURL
            ) {
             NSWorkspace.shared.open(url)
