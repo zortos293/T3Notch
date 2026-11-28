@@ -220,10 +220,7 @@ struct SettingsView: View {
     }
 
     private var desktopAppDetail: String {
-        let base =
-            "“Open in T3 Code” brings the desktop app forward instead of opening a browser tab. "
-            + "T3 Code has no deep link to a single thread, so it lands on whatever it was showing."
-        return T3CodeApp.isRunning ? base : base + " Not running right now, so the browser is used."
+        "“Open in T3 Code” opens the exact thread in the desktop app instead of a browser tab."
     }
 
     private var header: some View {
