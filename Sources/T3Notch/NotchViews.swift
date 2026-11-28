@@ -526,12 +526,15 @@ private struct ReviewBar: View {
     @Bindable var store: AgentStore
     let thread: ThreadShell
 
+    private var failed: Bool { resolveThreadAwarenessPhase(thread) == .failed }
+    private var tint: Color { failed ? .red : .green }
+
     var body: some View {
         HStack(spacing: 7) {
-            Image(systemName: "checkmark.seal.fill")
+            Image(systemName: failed ? "exclamationmark.octagon.fill" : "checkmark.seal.fill")
                 .font(.system(size: 10))
-                .foregroundStyle(.green)
-            Text("Finished — not reviewed yet")
+                .foregroundStyle(tint)
+            Text(failed ? "Failed — not reviewed yet" : "Finished — not reviewed yet")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.75))
                 .lineLimit(1)
@@ -557,11 +560,11 @@ private struct ReviewBar: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.green.opacity(0.1))
+                .fill(tint.opacity(0.1))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                .stroke(tint.opacity(0.25), lineWidth: 1)
         )
     }
 }

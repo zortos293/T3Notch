@@ -138,11 +138,11 @@ final class AgentStore {
         return threads.compactMap { thread -> (ThreadShell, AgentAwarenessPhase)? in
             guard let phase = resolveThreadAwarenessPhase(thread) else { return nil }
             switch phase {
-            case .running, .starting, .waitingForApproval, .waitingForInput, .failed:
+            case .running, .starting, .waitingForApproval, .waitingForInput:
                 return (thread, phase)
-            case .completed:
-                // A finished agent stays pinned until it has been reviewed in
-                // T3 Code, so a result can't slip past while you look away.
+            case .completed, .failed:
+                // A finished or failed agent stays pinned until it has been reviewed
+                // in T3 Code, so a result can't slip past while you look away.
                 return awaitsReview(thread) ? (thread, phase) : nil
             case .stale:
                 return nil
@@ -154,12 +154,16 @@ final class AgentStore {
         .map(\.0)
     }
 
-    /// Completed threads the user has not dealt with yet. `settledAt` is T3 Code's
-    /// own "handled" marker, so settling there clears the notch too.
+    /// Completed or failed threads the user has not dealt with yet. `settledAt` is
+    /// T3 Code's own "handled" marker, so settling there clears the notch too.
+    /// Failures stay regardless of `keepFinishedUntilReviewed`.
     func awaitsReview(_ thread: ThreadShell) -> Bool {
         _ = reviewRevision
-        guard settings.values.keepFinishedUntilReviewed else { return false }
-        guard resolveThreadAwarenessPhase(thread) == .completed else { return false }
+        switch resolveThreadAwarenessPhase(thread) {
+        case .failed: break
+        case .completed: guard settings.values.keepFinishedUntilReviewed else { return false }
+        default: return false
+        }
         guard thread.settledAt == nil else { return false }
         return !reviewStore.contains(completionKey(for: thread))
     }
